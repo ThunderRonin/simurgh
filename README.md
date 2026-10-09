@@ -16,9 +16,9 @@ Select a region, choose the intended series, and explicitly confirm it. Here the
 
 ### Investigate with evidence
 
-The local workspace brings a confirmed telemetry reference and a reviewed source selection into one bounded investigation. This completed live run compares the selected interval with its baseline, cites three evidence items, and keeps the missing causal link between source code and CPU behavior explicit.
+The dark-mode local workspace brings a confirmed telemetry reference and a reviewed source selection into one bounded investigation. This completed live run compares the selected interval with its baseline, cites three evidence items, and keeps the missing causal link between source code and CPU behavior explicit.
 
-![Simurgh workspace showing two attached references, a completed CPU comparison, cited findings, explicit limitations, and collected evidence](docs/screenshots/investigation-evidence.png)
+![Dark Simurgh workspace showing two attached references, a completed CPU comparison, cited findings, explicit limitations, and collected evidence](docs/screenshots/investigation-evidence.png)
 
 These are actual local MVP captures, not mockups or customer data. The source reference is a test fixture; it is not evidence that this code caused the observed CPU behavior. Screenshots illustrate the workflow, not production qualification. [Capture details](docs/screenshots/README.md).
 
