@@ -1,6 +1,8 @@
 # Simurgh
 
-<img src="assets/brand/clean/centered-logo-transparent.svg" alt="Centered Simurgh phoenix and teal gem" width="220">
+<p align="center">
+  <img src="assets/brand/clean/centered-logo-transparent.svg" alt="Centered Simurgh phoenix and teal gem" width="220">
+</p>
 
 Simurgh is an early-stage context inspector for observability dashboards. Phase 1 connects a browser selection to the identity and data of a Grafana panel, then lets the user inspect and confirm that captured context. A separate same-machine workspace/coordinator is experimental; one targeted cross-surface acceptance passed for a pinned local configuration, but this does not qualify other machines or production use.
 
