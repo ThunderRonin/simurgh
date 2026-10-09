@@ -1,5 +1,14 @@
 # Brand assets
 
+The README presents `clean/centered-logo-transparent.svg`, derived from the user-supplied centered SVG. Deterministic cleanup removes its single full-canvas `rgb(10,10,10)` background path, one detached black lettering remnant below the bird, and embedded C2PA metadata; all remaining vector elements, including their transforms and attributes, are preserved. The lettering remnant is a single closed path isolated below every other artwork path. The supplied PNG is archived unchanged and is not used as the README image.
+
+The centered source files are retained byte-for-byte in `source/`:
+
+- `centered-logo.svg` SHA-256: `0794441cb25261c565d2cdc2629aa18f23a53df8724617d5a946677cf6bca9d7`
+- `centered-logo.png` SHA-256: `4f0a46d456d44c05d4a515f4e72cf77eda3307dad05163e2100eb696422276ed`
+
+Recreate the transparent SVG with `python3 scripts/clean-centered-brand-svg.py`. Rasterize it to a transparent 2032x2032 PNG with `node scripts/rasterize-centered-brand-png.mjs`; this PNG is a deterministic browser rasterization of the cleaned SVG, not an edit to or replacement for the supplied PNG. The derivative omits embedded C2PA metadata because it no longer carries the original claim; the original source SVG retains that metadata.
+
 `clean/simurgh-logo.svg` and `clean/simurgh-logo.png` are the supplied artwork with only the bottom `SIMURGH` lettering removed. Their phoenix, gem, colors, dimensions, and near-black background are retained.
 
 The byte-for-byte supplied files are archived in `source/`:
