@@ -25,5 +25,8 @@ module.exports = {
     }],
   },
   resolve: { extensions: ['.tsx', '.ts', '.js'] },
-  plugins: [new CopyPlugin({ patterns: [{ from: 'src/plugin.json', to: 'plugin.json' }] })],
+  plugins: [new CopyPlugin({ patterns: [
+    { from: 'src/plugin.json', to: 'plugin.json' },
+    { from: '../../assets/brand/clean/simurgh-mark.svg', to: 'img/simurgh-mark.svg' },
+  ] })],
 };

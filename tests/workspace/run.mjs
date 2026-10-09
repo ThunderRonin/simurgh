@@ -324,6 +324,7 @@ async function assertNoOverflow(page, width) {
 
 async function assertDarkAppearance(page, ...selectors) {
   const appearance = await page.evaluate((surfaceSelectors) => ({
+    metaScheme: document.querySelector('meta[name="color-scheme"]')?.content,
     scheme: getComputedStyle(document.documentElement).colorScheme,
     page: getComputedStyle(document.body).backgroundColor,
     surfaces: surfaceSelectors.map((selector) => {
@@ -331,6 +332,7 @@ async function assertDarkAppearance(page, ...selectors) {
       return { selector, background: element && getComputedStyle(element).backgroundColor };
     }),
   }), selectors);
+  assert.equal(appearance.metaScheme, 'dark', 'workspace color-scheme metadata should default to dark');
   assert.equal(appearance.scheme, 'dark', `workspace color scheme should default to dark: ${JSON.stringify(appearance)}`);
   for (const surface of appearance.surfaces) {
     assert.ok(surface.background, `expected rendered dark surface ${surface.selector}`);

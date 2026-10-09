@@ -1,6 +1,10 @@
 # Simurgh
 
+<img src="assets/brand/clean/simurgh-logo.svg" alt="Simurgh phoenix and teal gem" width="220">
+
 Simurgh is an early-stage context inspector for observability dashboards. Phase 1 connects a browser selection to the identity and data of a Grafana panel, then lets the user inspect and confirm that captured context. A separate same-machine workspace/coordinator is experimental; one targeted cross-surface acceptance passed for a pinned local configuration, but this does not qualify other machines or production use.
+
+The logo source and the text-free SVG/PNG assets are in [assets/brand](assets/brand/README.md). The supplied originals are retained byte-for-byte for provenance.
 
 This project is licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE), [CONTRIBUTING.md](CONTRIBUTING.md), and [SECURITY.md](SECURITY.md).
 

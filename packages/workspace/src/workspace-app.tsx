@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import brandLogoUrl from '../../../assets/brand/clean/simurgh-mark.svg';
 import {
   Activity, AlertTriangle, ArrowDownToLine, AudioLines, Check, ChevronDown, CircleHelp, Clock3,
   FilePlus2, FileText, History, Layers3, LoaderCircle, LogOut, Mic, Pause, Play, Plus, RefreshCw,
@@ -1174,7 +1175,7 @@ function EmptyState({ icon, title, text }: { icon: React.ReactNode; title: strin
 }
 
 function BrandMark() {
-  return <span className="brand-mark" aria-hidden="true"><Layers3 size={17} /></span>;
+  return <span className="brand-mark" aria-hidden="true"><img src={brandLogoUrl} alt="" /></span>;
 }
 
 function sortInvestigations(items: InvestigationRecord[]): InvestigationRecord[] {

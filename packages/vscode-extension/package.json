@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "license": "Apache-2.0",
+  "icon": "simurgh-logo.png",
   "engines": {
     "vscode": "^1.100.0"
   },

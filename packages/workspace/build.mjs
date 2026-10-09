@@ -16,6 +16,7 @@ await build({
   format: 'esm',
   platform: 'browser',
   target: 'es2022',
+  loader: { '.svg': 'dataurl' },
   outfile: path.join(output, 'workspace.js'),
   logLevel: 'info',
 });

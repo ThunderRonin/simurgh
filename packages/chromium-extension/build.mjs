@@ -37,3 +37,10 @@ await build({
   minify: true,
 });
 await copyFile(path.join(here, configuration.manifest), path.join(outDir, 'manifest.json'));
+await mkdir(path.join(outDir, 'icons'), { recursive: true });
+for (const size of [16, 32, 48, 128]) {
+  await copyFile(
+    path.resolve(here, `../../assets/brand/clean/simurgh-mark-${size}.png`),
+    path.join(outDir, `icons/simurgh-mark-${size}.png`),
+  );
+}
