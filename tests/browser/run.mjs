@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { freehandPathAroundSamples, pointInPolygon } from './freehand-geometry.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const extensionDir = path.resolve(
@@ -537,27 +538,48 @@ async function verifyFreehandGesture() {
     assert.ok(resizedMessage?.freehandBinding, 'The resized native renderer could not bind again after reopening');
     plotRect = resizedMessage.freehandBinding.plotRect;
     await inspector.getByTestId('begin-freehand').click();
-    await page.getByTestId('freehand-surface').waitFor({ state: 'visible' });
+    const initialSurface = page.getByTestId('freehand-surface');
+    await initialSurface.waitFor({ state: 'visible' });
+    const initialSurfaceBox = await initialSurface.boundingBox();
+    assert.ok(initialSurfaceBox && Math.abs(initialSurfaceBox.width - plotRect.width) <= 2 && Math.abs(initialSurfaceBox.height - plotRect.height) <= 2,
+      `Active freehand surface differs from its bound native plot rectangle: ${JSON.stringify({ initialSurfaceBox, plotRect })}`);
 
-    const circlePoints = (rect) => Array.from({ length: 40 }, (_unused, index) => {
-        const angle = index / 39 * Math.PI * 2;
-        return { x: rect.left + rect.width * (0.5 + 0.46 * Math.cos(angle)),
-          y: rect.top + rect.height * (0.92 + 0.079 * Math.sin(angle)) };
-      });
-    const drawCircle = async (rect) => {
-      const circle = circlePoints(rect);
-      await page.mouse.move(circle[0].x, circle[0].y);
+    const prepareCurrentGesture = async (bindingMessage) => {
+      const response = await latestNumericResponse(queries);
+      assert.ok(response, 'The current Grafana chart has no datasource samples for freehand geometry');
+      actual = response.series;
+      const range = { from: epoch(response.requestRange?.from), to: epoch(response.requestRange?.to) };
+      assert.deepEqual(range, bindingMessage.capture.range,
+        'Samples used to place the freehand path do not match the currently bound request range');
+      const capturedSeries = bindingMessage.capture.series;
+      const candidates = actual.filter((item) => capturedSeries.some((candidate) =>
+        JSON.stringify(item.labels, Object.keys(item.labels).sort()) ===
+        JSON.stringify(candidate.labels, Object.keys(candidate.labels).sort())));
+      const path = freehandPathAroundSamples(candidates, range, bindingMessage.freehandBinding.plotRect);
+      for (const target of path.targets) {
+        const source = candidates.find((item) =>
+          JSON.stringify(item.labels, Object.keys(item.labels).sort()) === JSON.stringify(target.labels, Object.keys(target.labels).sort()));
+        assert.ok(source?.points.some((point) => point.time === target.time && point.value === target.value),
+          `Freehand target is not an exact current datasource sample: ${JSON.stringify(target)}`);
+        assert.ok(pointInPolygon(target, path.vertices), 'Expected datasource sample lies outside the drawn freehand path');
+      }
+      return path;
+    };
+    const initialGesture = await prepareCurrentGesture(resizedMessage);
+    const drawGesture = async (box, vertices) => {
+      const path = vertices.map((point) => ({ x: box.x + point.x, y: box.y + point.y }));
+      await page.mouse.move(path[0].x, path[0].y);
       await page.mouse.down();
-      for (const point of circle.slice(1)) await page.mouse.move(point.x, point.y, { steps: 1 });
+      for (const point of path.slice(1)) await page.mouse.move(point.x, point.y, { steps: 1 });
       await page.mouse.up();
     };
-    const staleCircle = circlePoints(plotRect);
+    const stalePath = initialGesture.vertices.map((point) => ({ x: initialSurfaceBox.x + point.x, y: initialSurfaceBox.y + point.y }));
     const refreshIndex = queries.length;
-    await page.mouse.move(staleCircle[0].x, staleCircle[0].y);
+    await page.mouse.move(stalePath[0].x, stalePath[0].y);
     await page.mouse.down();
     await page.getByRole('button', { name: 'Refresh', exact: true }).evaluate((button) => button.click());
     await waitForNumericResponse(queries, refreshIndex);
-    for (const point of staleCircle.slice(1)) await page.mouse.move(point.x, point.y, { steps: 1 });
+    for (const point of stalePath.slice(1)) await page.mouse.move(point.x, point.y, { steps: 1 });
     await page.mouse.up();
     await inspector.getByText(/chart data, visibility, scale, or layout changed during the gesture/i).waitFor({ state: 'visible', timeout: 10_000 });
     assert.equal(await inspector.getByTestId('begin-freehand').count(), 0,
@@ -568,9 +590,14 @@ async function verifyFreehandGesture() {
       message.kind === 'capture' && message.freehandBinding).at(-1));
     assert.ok(refreshedMessage?.freehandBinding, 'A refreshed native renderer could not bind to its current panel data');
     plotRect = refreshedMessage.freehandBinding.plotRect;
+    const gesture = await prepareCurrentGesture(refreshedMessage);
     await inspector.getByTestId('begin-freehand').click();
-    await page.getByTestId('freehand-surface').waitFor({ state: 'visible' });
-    await drawCircle(plotRect);
+    const refreshedSurface = page.getByTestId('freehand-surface');
+    await refreshedSurface.waitFor({ state: 'visible' });
+    const refreshedSurfaceBox = await refreshedSurface.boundingBox();
+    assert.ok(refreshedSurfaceBox && Math.abs(refreshedSurfaceBox.width - plotRect.width) <= 2 && Math.abs(refreshedSurfaceBox.height - plotRect.height) <= 2,
+      `Refreshed freehand surface differs from its bound native plot rectangle: ${JSON.stringify({ refreshedSurfaceBox, plotRect })}`);
+    await drawGesture(refreshedSurfaceBox, gesture.vertices);
 
     await waitUntil(async () => page.evaluate(() => window.__simurghBridgeMessages.some(message =>
       message.kind === 'capture' && message.capture?.selectionMethod === 'grafana-freehand') ||
@@ -584,7 +611,8 @@ async function verifyFreehandGesture() {
     assert.ok(resultMessage, `Native freehand was rejected: ${error.join(' | ')}; submit=${JSON.stringify(submittedGesture)}`);
     const snapshot = resultMessage.capture;
     assert.ok(snapshot.freehand.vertices.length >= 3, 'Confirmed geometry did not retain the actual freehand path');
-    assert.ok(snapshot.freehand.candidates.length > 1, 'The overlapping freehand gesture did not preserve multiple explicit series candidates');
+    assert.ok(snapshot.freehand.candidates.length >= Math.min(gesture.targets.length, 2),
+      'The sample-centered freehand path did not preserve its enclosed explicit series candidates');
     assert.equal(snapshot.freehand.candidates.length, await inspector.locator('[data-testid^="series-option-"]').count());
     assert.ok(snapshot.freehand.interval.from >= snapshot.range.from && snapshot.freehand.interval.to <= snapshot.range.to);
 

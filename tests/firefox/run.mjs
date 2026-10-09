@@ -5,6 +5,7 @@ import path from 'node:path';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { freePort, startGeckodriver, waitForGeckodriver, WebDriver } from './webdriver.mjs';
+import { freehandPathAroundSamples, pointInPolygon } from '../browser/freehand-geometry.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const firefoxBinary = path.resolve(process.env.SIMURGH_FIREFOX_BIN ?? path.join(root, 'work/firefox-tools/firefox/firefox'));
@@ -69,6 +70,10 @@ try {
   60_000, 'Grafana dashboard panel did not load');
   await waitFor(async () => driver.execute(`return Boolean(document.querySelector('[data-testid="simurgh-overlay-host"]'))`),
     30_000, 'Temporary Firefox add-on did not inject its content script on Grafana');
+  await driver.execute(`window.__simurghBridgeMessages=[];window.addEventListener('message',event=>{
+    if(event.source===window&&event.origin===location.origin&&event.data?.channel==='simurgh.context')
+      window.__simurghBridgeMessages.push(event.data);
+  });`);
   await waitFor(async () => driver.execute(`return new URL(location.href).searchParams.get('var-host') === 'node-exporter:9100'`),
     20_000, 'Grafana host variable did not resolve before refresh setup');
   await waitFor(async () => driver.execute(`return [...document.querySelectorAll('canvas')].some(el => {
@@ -127,17 +132,27 @@ try {
   await assertRefreshState(driver, null, activeUrlState, 'after reopening refreshed Freehand inspector');
 
   phase = 'freehand-selection';
+  const activeMessage = await driver.execute(`return window.__simurghBridgeMessages.filter(message=>
+    message.kind==='capture'&&message.freehandBinding).at(-1) ?? null;`);
+  assert.ok(activeMessage?.capture?.series?.length && activeMessage.freehandBinding,
+    'Firefox did not expose the current sample-bound renderer capture');
   await clickInShadow(driver, '[data-testid="begin-freehand"]');
   const surface = await waitFor(async () => driver.execute(`const root = document.querySelector('[data-testid="simurgh-overlay-host"]')?.shadowRoot;
     const canvas = root?.querySelector('[data-testid="freehand-surface"]');
     if (!canvas) return null; const r = canvas.getBoundingClientRect();
     return r.width > 100 && r.height > 80 ? { x:r.x,y:r.y,width:r.width,height:r.height } : null;`),
   10_000, 'Freehand canvas did not appear');
-  const vertices = Array.from({ length: 40 }, (_unused, index) => {
-    const angle = index / 39 * Math.PI * 2;
-    return { x: surface.x + surface.width * (0.5 + 0.46 * Math.cos(angle)),
-      y: surface.y + surface.height * (0.92 + 0.079 * Math.sin(angle)) };
-  });
+  const plotRect = activeMessage.freehandBinding.plotRect;
+  assert.ok(Math.abs(surface.width - plotRect.width) <= 2 && Math.abs(surface.height - plotRect.height) <= 2,
+    `Active Firefox freehand surface differs from its current plot binding: ${JSON.stringify({ surface, plotRect })}`);
+  const gesture = freehandPathAroundSamples(activeMessage.capture.series, activeMessage.capture.range, plotRect);
+  for (const target of gesture.targets) {
+    assert.ok(pointInPolygon(target, gesture.vertices), 'Expected Firefox sample lies outside the generated freehand path');
+    await comparePrometheusSamples({ query: activeMessage.capture.query, selected: {
+      refId: target.refId, labels: target.labels, points: [{ time: target.time, value: target.value }],
+    } });
+  }
+  const vertices = gesture.vertices.map((point) => ({ x: surface.x + point.x, y: surface.y + point.y }));
   await driver.drag(vertices);
   await waitFor(async () => driver.execute(`const root = document.querySelector('[data-testid="simurgh-overlay-host"]')?.shadowRoot;
     return Boolean(root?.querySelector('[data-testid^="series-option-"]')) ||
