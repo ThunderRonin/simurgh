@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -198,6 +198,38 @@ async function findPanelMenu(page) {
   throw new Error('Could not find the native Grafana panel menu button');
 }
 
+async function openSimurghMenuAction(page) {
+  const menu = await findPanelMenu(page);
+  await menu.click();
+  const extensions = page.getByRole('menuitem', { name: 'Extensions', exact: true });
+  await extensions.waitFor({ state: 'visible', timeout: 10_000 });
+  await extensions.click();
+  const action = page.getByRole('menuitem', { name: 'Inspect with Simurgh', exact: true });
+  await action.waitFor({ state: 'visible', timeout: 10_000 });
+  return action;
+}
+
+async function saveFailureEvidence(page, error, contextName, consoleEvents, pageErrors) {
+  if (!page || page.isClosed()) return;
+  const timestamp = new Date().toISOString().replaceAll(':', '-');
+  const prefix = path.join(artifactDir, `failure-${contextName}-${timestamp}`);
+  await page.screenshot({ path: `${prefix}.png`, fullPage: true, timeout: 10_000 }).catch(() => {});
+  let bridgeMessages = [];
+  try {
+    bridgeMessages = await page.evaluate(() => window.__simurghBridgeMessages ?? []);
+  } catch {}
+  const diagnostics = {
+    context: contextName,
+    url: page.url(),
+    viewport: page.viewportSize(),
+    error: { name: error?.name, message: error?.message, stack: error?.stack },
+    consoleEvents,
+    pageErrors,
+    bridgeMessages,
+  };
+  await writeFile(`${prefix}.json`, JSON.stringify(diagnostics, null, 2));
+}
+
 async function selectNativeRange(page, initialRange, latestSampleTime) {
   const before = new URL(page.url());
   const canvases = page.locator('canvas');
@@ -245,12 +277,7 @@ async function selectNativeRange(page, initialRange, latestSampleTime) {
 }
 
 async function openInspector(page) {
-  const menu = await findPanelMenu(page);
-  await menu.click();
-  const extensions = page.getByRole('menuitem', { name: 'Extensions', exact: true });
-  if (await extensions.count()) await extensions.click();
-  const action = page.getByText('Inspect with Simurgh', { exact: true });
-  await action.waitFor({ state: 'visible', timeout: 10_000 });
+  const action = await openSimurghMenuAction(page);
   await action.click();
   const inspector = page.locator('section[data-testid="simurgh-inspector"]');
   await inspector.waitFor({ state: 'visible', timeout: 15_000 });
@@ -268,8 +295,13 @@ async function openConfirmedBundle(inspector) {
 
 async function verifyMissingExtensionState() {
   const browser = await chromium.launch(browserLaunchOptions());
+  let page;
+  const consoleEvents = [];
+  const pageErrors = [];
   try {
-    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, timezoneId: 'UTC' });
+    page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, timezoneId: 'UTC' });
+    page.on('console', message => consoleEvents.push({ type: message.type(), text: message.text(), location: message.location() }));
+    page.on('pageerror', error => pageErrors.push(error.message));
     const grafanaQueries = [];
     page.on('response', response => {
       if (response.url().includes('/api/ds/query') && response.request().method() === 'POST') {
@@ -295,17 +327,17 @@ async function verifyMissingExtensionState() {
     assert.equal(zoomResponse.status, 200, 'Native Grafana zoom query failed in the missing-extension context');
     assert.equal(epoch(zoomResponse.requestRange?.from), epoch(zoom.from), 'Missing-extension native request start is not absolute');
     assert.equal(epoch(zoomResponse.requestRange?.to), epoch(zoom.to), 'Missing-extension native request end is not absolute');
-    const menu = await findPanelMenu(page);
-    await menu.click();
-    const extensions = page.getByRole('menuitem', { name: 'Extensions', exact: true });
-    if (await extensions.count()) await extensions.click();
-    await page.getByText('Inspect with Simurgh', { exact: true }).click();
+    const action = await openSimurghMenuAction(page);
+    await action.click();
     const dialog = page.getByRole('dialog');
     await dialog.waitFor({ state: 'visible', timeout: 15_000 });
     const dialogText = await dialog.innerText();
     await page.getByText('Simurgh extension required', { exact: true }).waitFor({ state: 'visible' });
     assert.match(dialogText, /install and enable.*Chromium extension/i, 'Missing-extension dialog does not tell the user what to do');
     return dialogText;
+  } catch (error) {
+    await saveFailureEvidence(page, error, 'missing-extension', consoleEvents, pageErrors);
+    throw error;
   } finally {
     await browser.close();
   }
@@ -353,6 +385,9 @@ async function main() {
   await mkdir(artifactDir, { recursive: true });
   const profileDir = await mkdtemp(path.join(os.tmpdir(), 'simurgh-browser-'));
   let context;
+  let page;
+  const consoleEvents = [];
+  const pageErrors = [];
   try {
     context = await chromium.launchPersistentContext(profileDir, {
       ...browserLaunchOptions(),
@@ -363,9 +398,12 @@ async function main() {
         `--load-extension=${extensionDir}`,
       ],
     });
-    const page = await context.newPage();
+    page = await context.newPage();
     const grafanaQueries = [];
-    page.on('pageerror', error => errors.push(error.message));
+    page.on('pageerror', error => {
+      errors.push(error.message);
+      pageErrors.push(error.message);
+    });
     await page.addInitScript(() => {
       window.__simurghBridgeMessages = [];
       window.addEventListener('message', event => {
@@ -388,6 +426,7 @@ async function main() {
       }
     });
     page.on('console', message => {
+      consoleEvents.push({ type: message.type(), text: message.text(), location: message.location() });
       if (message.type() === 'error') {
         const location = message.location().url;
         if (location.includes('/api/user/stars') && /401/.test(message.text())) expectedConsoleErrors.push(message.text());
@@ -436,6 +475,14 @@ async function main() {
     const initialSnapshot = JSON.parse(initialBundleText);
     assert.equal(initialSnapshot.selected.id, chosenId, 'Confirmed snapshot selected a different series than the explicit radio choice');
     assertSnapshotAgainstGrafana(initialSnapshot, nativeSeries, zoom);
+    const downloadPromise = page.waitForEvent('download');
+    await inspector.getByRole('button', { name: 'Download JSON', exact: true }).click();
+    const download = await downloadPromise;
+    assert.ok(download.suggestedFilename().includes(initialSnapshot.captureId), 'JSON download filename is not bound to the confirmed capture');
+    const downloadPath = await download.path();
+    assert.ok(downloadPath, 'Confirmed JSON download did not produce a file');
+    assert.deepEqual(JSON.parse(await readFile(downloadPath, 'utf8')), initialSnapshot,
+      'Downloaded JSON differs from the exact confirmed snapshot');
 
     await inspector.getByRole('button', { name: /correct selection/i }).click();
     await bundle.waitFor({ state: 'detached', timeout: 10_000 });
@@ -577,6 +624,7 @@ async function main() {
       comparedQueryFrames: nativeSeries.length,
       correctedStart: correctedStart,
       confirmedSnapshotLength: confirmedText.length,
+      downloadedFilename: download.suggestedFilename(),
       secondCaptureId: secondSnapshot.captureId,
       secondCaptureRequestSeq: secondBridgeCapture.requestSeq,
       retainedAcceptedBundles: retainedAfterSecondCapture.length,
@@ -584,6 +632,9 @@ async function main() {
       browserErrors: errors,
       expectedAnonymousViewerErrors: expectedConsoleErrors,
     }, null, 2));
+  } catch (error) {
+    await saveFailureEvidence(page, error, 'extension', consoleEvents, pageErrors);
+    throw error;
   } finally {
     await context?.close();
     await rm(profileDir, { recursive: true, force: true });
