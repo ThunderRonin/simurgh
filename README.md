@@ -6,6 +6,22 @@ This project is licensed under the [Apache License 2.0](LICENSE). See [NOTICE](N
 
 See [Phase 1 status](docs/phase1-status.md) for the current selection flow, evidence boundaries, and acceptance status.
 
+## See the workflow
+
+### Confirm the dashboard context
+
+Select a region, choose the intended series, and explicitly confirm it. Here the Firefox inspector shows a confirmed CPU 0 selection from the local Grafana lab, with the selected interval and JSON export available.
+
+![Grafana CPU chart with the Simurgh Firefox inspector showing a confirmed CPU 0 selection, its interval, and export controls](docs/screenshots/grafana-confirmed-selection.png)
+
+### Investigate with evidence
+
+The local workspace brings a confirmed telemetry reference and a reviewed source selection into one bounded investigation. This completed live run compares the selected interval with its baseline, cites three evidence items, and keeps the missing causal link between source code and CPU behavior explicit.
+
+![Simurgh workspace showing two attached references, a completed CPU comparison, cited findings, explicit limitations, and collected evidence](docs/screenshots/investigation-evidence.png)
+
+These are actual local MVP captures, not mockups or customer data. The source reference is a test fixture; it is not evidence that this code caused the observed CPU behavior. Screenshots illustrate the workflow, not production qualification. [Capture details](docs/screenshots/README.md).
+
 ## Experimental local MVP
 
 The same-machine workspace can import confirmed dashboard or reviewed source references, run bounded evidence reads, share investigation records with explicit local grants, and optionally use CPU-only local speech. This is a developer MVP, not a hosted service or production deployment. Follow the [local MVP runbook](docs/local-mvp.md) for setup and its current verification boundaries.
