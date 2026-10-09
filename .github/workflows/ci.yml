@@ -24,6 +24,8 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Verify release artifact packager
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/release -v
       - run: npm ci
       - run: npm audit --audit-level=high --registry=https://registry.npmjs.org
       - run: npm test

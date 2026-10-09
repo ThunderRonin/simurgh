@@ -26,3 +26,5 @@ test-results/
 playwright-report/
 tests/browser/artifacts/
 packages/vscode-extension/.vscode-test/
+scripts/__pycache__/
+tests/release/__pycache__/
