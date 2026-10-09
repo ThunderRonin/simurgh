@@ -1,0 +1,29 @@
+name: Feature request
+description: Propose a user-facing improvement or capability.
+title: "feature: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: "Do not include customer telemetry, credentials, private hostnames, or personal data."
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: What task is difficult or impossible today?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable behavior and how the user stays in control.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and tradeoffs
+      description: Note affected integrations, permissions, data access, or compatibility expectations.
+    validations:
+      required: false

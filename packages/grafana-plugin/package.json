@@ -1,0 +1,21 @@
+{
+  "name": "@simurgh/grafana-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "scripts": {
+    "build": "webpack --config webpack.config.cjs --mode production",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@grafana/data": "13.2.3",
+    "@grafana/runtime": "13.2.3",
+    "@grafana/ui": "13.2.3",
+    "react": "19.1.0",
+    "react-dom": "19.1.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.1.8",
+    "@types/react-dom": "19.1.7"
+  }
+}

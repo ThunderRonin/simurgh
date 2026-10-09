@@ -1,0 +1,28 @@
+{
+  "$schema": "https://raw.githubusercontent.com/grafana/grafana/main/docs/sources/developers/plugins/plugin.schema.json",
+  "type": "app",
+  "name": "Simurgh Context Inspector",
+  "id": "simurgh-context-app",
+  "info": {
+    "keywords": ["app", "context"],
+    "description": "Capture inspectable context from supported Grafana time series panels.",
+    "author": { "name": "Simurgh contributors" },
+    "version": "0.1.0",
+    "updated": "2026-10-09",
+    "license": "Apache-2.0"
+  },
+  "dependencies": {
+    "grafanaDependency": ">=13.2.3 <13.3.0",
+    "plugins": []
+  },
+  "extensions": {
+    "addedLinks": [
+      {
+        "targets": ["grafana/dashboard/panel/menu"],
+        "title": "Inspect with Simurgh",
+        "description": "Inspect captured panel data and its absolute time range."
+      }
+    ]
+  },
+  "includes": []
+}

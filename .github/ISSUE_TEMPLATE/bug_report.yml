@@ -1,0 +1,42 @@
+name: Bug report
+description: Report a reproducible problem using synthetic or local data.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Do not include customer telemetry, credentials, private hostnames, or personal data. Report security issues privately."
+  - type: input
+    id: version
+    attributes:
+      label: Commit or version
+      description: Include the exact commit when possible.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, browser, Grafana version, and datasource type; omit private hostnames.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Use synthetic or local lab data.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: checks
+    attributes:
+      label: Checks or logs
+      description: Redact sensitive values. Attach screenshots only from synthetic or local data.
+    validations:
+      required: false

@@ -5,3 +5,21 @@
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+
+# Local agent and browser-session state
+.agents/
+.claude/
+.codex/
+.cursor/
+.playwright-cli/
+work/
+# Local funding brief; do not publish personal support requests.
+SIMURGH-BRIEF.md
+SIMURGH-BRIEF.pdf
+.env
+node_modules/
+dist/
+coverage/
+test-results/
+playwright-report/
+tests/browser/artifacts/

@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Simurgh Context Inspector",
+  "version": "0.1.0",
+  "description": "Inspect selected context from supported Grafana panels.",
+  "permissions": [],
+  "host_permissions": [
+    "http://localhost:3300/*",
+    "http://127.0.0.1:3300/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "http://localhost:3300/*",
+        "http://127.0.0.1:3300/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Simurgh Context Inspector"
+  }
+}

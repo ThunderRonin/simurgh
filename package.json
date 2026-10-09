@@ -1,0 +1,29 @@
+{
+  "name": "simurgh",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:browser": "node tests/browser/run.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck --workspace @simurgh/shared && npm run typecheck --workspace @simurgh/grafana-plugin && npm run typecheck --workspace @simurgh/chromium-extension",
+    "build": "npm run build --workspace @simurgh/grafana-plugin && npm run build --workspace @simurgh/chromium-extension"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.11",
+    "@types/node": "22.19.3",
+    "playwright": "1.64.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11",
+    "webpack": "5.111.1",
+    "webpack-cli": "6.0.1",
+    "ts-loader": "9.6.2",
+    "copy-webpack-plugin": "14.0.0"
+  }
+}
