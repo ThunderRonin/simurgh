@@ -291,14 +291,27 @@ function frameMetadataMismatch(nativeFrames: FrameSnapshot[], contextFrames: Non
     return `native/context numeric field counts differ (${nativeNumeric.length}/${contextNumeric.length})`;
   }
   const matchedNativeFields = new Set<FrameSnapshot['fields'][number]>();
-  for (const { field } of contextNumeric) {
+  for (const { refId, field } of contextNumeric) {
     if (performance.now() > deadline) return 'native field comparison exceeded the 200 ms work budget';
     const contextValues = readValues(field.values);
     if (!contextValues) return 'a context numeric field vector is unavailable';
-    const matches = nativeNumeric.filter((nativeField) => nativeField.name === field.name && nativeField.type === field.type &&
-      sameLabels(nativeField.labels, field.labels ?? {}) && sameValuesBefore(nativeField.values, contextValues, deadline));
+    const sameNameAndType = nativeNumeric.filter((nativeField) => nativeField.name === field.name && nativeField.type === field.type);
+    const sameIdentity = sameNameAndType.filter((nativeField) => sameLabels(nativeField.labels, field.labels ?? {}));
+    const matches = sameIdentity.filter((nativeField) => sameValuesBefore(nativeField.values, contextValues, deadline));
     if (performance.now() > deadline) return 'native field comparison exceeded the 200 ms work budget';
-    if (matches.length !== 1 || matchedNativeFields.has(matches[0])) return 'native numeric field identity, labels, or values are ambiguous';
+    if (matches.length === 0) {
+      const identity = `${refId ?? 'unknown'}:${field.name ?? 'unknown'} labels=${JSON.stringify(normalizeLabels(field.labels))}`;
+      if (sameIdentity.length > 0) {
+        const contextNulls = contextValues.filter((value) => value === null || value === undefined).length;
+        const rendererShapes = sameIdentity.map((nativeField) =>
+          `${nativeField.values.length} values/${nativeField.values.filter((value) => value === null || value === undefined).length} nulls`);
+        return `native numeric field values differ for ${identity} (context=${contextValues.length} values/${contextNulls} nulls; renderer=${rendererShapes.join(', ')})`;
+      }
+      return `native numeric field identity differs for ${identity} (${sameNameAndType.length} same-name/type renderer fields)`;
+    }
+    if (matches.length !== 1 || matchedNativeFields.has(matches[0])) {
+      return `native numeric field identity is ambiguous for ${refId ?? 'unknown'}:${field.name ?? 'unknown'} (${matches.length} exact renderer matches)`;
+    }
     matchedNativeFields.add(matches[0]);
   }
   const nativeTimeFields = nativeFields.filter((field) => field.type === 'time');

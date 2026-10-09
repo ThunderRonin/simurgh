@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -205,19 +206,78 @@ async function openSimurghMenuAction(page, actionTitle = 'Inspect with Simurgh')
   await extensions.waitFor({ state: 'visible', timeout: 10_000 });
   await extensions.click();
   const action = page.getByRole('menuitem', { name: actionTitle, exact: true });
-  await action.waitFor({ state: 'visible', timeout: 10_000 });
+  try {
+    await action.waitFor({ state: 'visible', timeout: 10_000 });
+  } catch (error) {
+    await saveFailureEvidence(page, error, `menu-${actionTitle.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}`, [], []);
+    throw error;
+  }
   return action;
 }
 
-async function saveFailureEvidence(page, error, contextName, consoleEvents, pageErrors) {
+async function saveFailureEvidence(page, error, contextName, consoleEvents, pageErrors, extra = {}) {
   if (!page || page.isClosed()) return;
   const timestamp = new Date().toISOString().replaceAll(':', '-');
   const prefix = path.join(artifactDir, `failure-${contextName}-${timestamp}`);
   await page.screenshot({ path: `${prefix}.png`, fullPage: true, timeout: 10_000 }).catch(() => {});
-  let bridgeMessages = [];
+  let pageState = {};
   try {
-    bridgeMessages = await page.evaluate(() => window.__simurghBridgeMessages ?? []);
+    pageState = await page.evaluate(() => {
+      const visible = element => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const text = element => (element.innerText || element.getAttribute('aria-label') || element.getAttribute('title') || '')
+        .replace(/\s+/g, ' ').trim().slice(0, 180);
+      const fingerprint = value => {
+        const source = JSON.stringify(value);
+        let hash = 2166136261;
+        for (let index = 0; index < source.length; index += 1) {
+          hash ^= source.charCodeAt(index);
+          hash = Math.imul(hash, 16777619);
+        }
+        return (hash >>> 0).toString(16);
+      };
+      return {
+        dialogs: [...document.querySelectorAll('[role="dialog"]')].filter(visible).map(text),
+        menus: [...document.querySelectorAll('[role="menu"]')].filter(visible).map(text),
+        menuItems: [...document.querySelectorAll('[role="menuitem"]')].filter(visible).map(text),
+        buttons: [...document.querySelectorAll('button')].filter(visible).map(text).filter(Boolean).slice(-40),
+        bridgeMessages: (window.__simurghBridgeMessages ?? []).map(message => ({
+          kind: message.kind,
+          sessionId: message.sessionId,
+          requestSeq: message.requestSeq,
+          captureId: message.capture?.captureId,
+          selectionMethod: message.capture?.selectionMethod,
+          range: message.capture?.range,
+          series: message.capture?.series?.map(series => ({
+            id: series.id,
+            refId: series.refId,
+            name: series.name,
+            labels: series.labels,
+            pointCount: series.points?.length ?? 0,
+            pointHash: fingerprint(series.points ?? []),
+          })),
+          freehandBinding: message.freehandBinding && {
+            id: message.freehandBinding.id,
+            plotRect: message.freehandBinding.plotRect,
+            grafanaVersion: message.freehandBinding.grafanaVersion,
+            uPlotVersion: message.freehandBinding.uPlotVersion,
+          },
+          error: message.error,
+        })),
+        canvases: [...document.querySelectorAll('canvas')].filter(visible).map(canvas => ({
+          width: canvas.width,
+          height: canvas.height,
+          cssWidth: Math.round(canvas.getBoundingClientRect().width),
+          cssHeight: Math.round(canvas.getBoundingClientRect().height),
+          fingerprint: fingerprint(canvas.toDataURL().slice(0, 4096)),
+        })),
+      };
+    });
   } catch {}
+  const queryFrames = await summarizeQueryFrames(extra.queries ?? []);
   const diagnostics = {
     context: contextName,
     url: page.url(),
@@ -225,9 +285,86 @@ async function saveFailureEvidence(page, error, contextName, consoleEvents, page
     error: { name: error?.name, message: error?.message, stack: error?.stack },
     consoleEvents,
     pageErrors,
-    bridgeMessages,
+    pageState,
+    queryFrames,
+    ...extra.details,
   };
   await writeFile(`${prefix}.json`, JSON.stringify(diagnostics, null, 2));
+}
+
+async function summarizeQueryFrames(responses) {
+  const result = [];
+  for (const response of responses.slice(-6)) {
+    let body;
+    try {
+      body = await response.body;
+    } catch (error) {
+      result.push({ status: response.status, requestRange: response.requestRange, responseError: error.message });
+      continue;
+    }
+    const frames = queryFrames(body).map(frame => {
+      const fields = frame.schema?.fields ?? [];
+      const columns = frame.data?.values ?? [];
+      return {
+        refId: frame.refId,
+        fields: fields.map((field, index) => {
+          const values = columns[index] ?? [];
+          return {
+            name: field.name,
+            type: field.type,
+            labels: field.labels,
+            length: values.length,
+            nullCount: values.filter(value => value === null || value === undefined).length,
+            valueHash: createHash('sha256').update(JSON.stringify(values)).digest('hex').slice(0, 16),
+          };
+        }),
+      };
+    });
+    result.push({ status: response.status, requestRange: response.requestRange, frames });
+  }
+  return result;
+}
+
+async function nativeCanvasSignature(page) {
+  return page.evaluate(() => {
+    const canvases = [...document.querySelectorAll('canvas')].filter(canvas => {
+      const rect = canvas.getBoundingClientRect();
+      return rect.width > 300 && rect.height > 120;
+    });
+    const hashCanvas = canvas => {
+      const sample = document.createElement('canvas');
+      sample.width = 96;
+      sample.height = 48;
+      const context = sample.getContext('2d', { willReadFrequently: true });
+      if (!context) return 'unavailable';
+      context.drawImage(canvas, 0, 0, sample.width, sample.height);
+      const pixels = context.getImageData(0, 0, sample.width, sample.height).data;
+      let hash = 2166136261;
+      for (let index = 0; index < pixels.length; index += 4) {
+        hash ^= pixels[index] | pixels[index + 1] << 8 | pixels[index + 2] << 16 | pixels[index + 3] << 24;
+        hash = Math.imul(hash, 16777619);
+      }
+      return (hash >>> 0).toString(16);
+    };
+    return canvases.map(canvas => `${canvas.width}x${canvas.height}:${hashCanvas(canvas)}`).join('|');
+  });
+}
+
+async function waitForNativeCanvasAfterRange(page, beforeSignature, timeout = 15_000) {
+  const deadline = Date.now() + timeout;
+  let previous;
+  let changed = false;
+  let stableFrames = 0;
+  while (Date.now() < deadline) {
+    const current = await nativeCanvasSignature(page);
+    changed ||= current.length > 0 && current !== beforeSignature;
+    if (changed && current === previous) stableFrames += 1;
+    else stableFrames = 0;
+    if (stableFrames >= 3) return current;
+    previous = current;
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => resolve())));
+  }
+  throw new Error(`Grafana native chart did not produce a changed, stable canvas after range query (changed=${changed}, stableFrames=${stableFrames})`);
 }
 
 async function selectNativeRange(page, initialRange, latestSampleTime) {
@@ -246,6 +383,7 @@ async function selectNativeRange(page, initialRange, latestSampleTime) {
     }
   }
   assert.ok(target, 'Could not locate the native Grafana timeseries canvas');
+  const canvasBeforeSignature = await nativeCanvasSignature(page);
 
   const targetEnd = Math.min(initialRange.to, latestSampleTime - 1000);
   const targetStart = Math.max(initialRange.from, latestSampleTime - 120_000);
@@ -273,7 +411,7 @@ async function selectNativeRange(page, initialRange, latestSampleTime) {
   assert.ok(from && to, `Native Grafana zoom did not publish absolute from/to in the URL (before=${before.href}, after=${after.href})`);
   assert.notEqual(`${from}/${to}`, `${before.searchParams.get('from')}/${before.searchParams.get('to')}`,
     'Native Grafana range did not change after drag');
-  return { from, to, targetStart, targetEnd, startRatio, endRatio };
+  return { from, to, targetStart, targetEnd, startRatio, endRatio, canvasBeforeSignature };
 }
 
 async function openInspector(page) {
@@ -292,9 +430,25 @@ async function openFreehandInspector(page) {
     await inspector.waitFor({ state: 'visible', timeout: 15_000 });
   } catch {
     const dialogs = await page.getByRole('dialog').allTextContents();
-    const status = await page.evaluate(() => [...document.querySelectorAll('[role="dialog"]')].map(item => item.textContent));
-    const bridge = await page.evaluate(() => window.__simurghBridgeMessages ?? []);
-    throw new Error(`Freehand action did not open the inspector. dialogs=${JSON.stringify(dialogs)} status=${JSON.stringify(status)} bridge=${JSON.stringify(bridge)}`);
+    const bridge = await page.evaluate(() => (window.__simurghBridgeMessages ?? []).map(message => ({
+      kind: message.kind,
+      sessionId: message.sessionId,
+      requestSeq: message.requestSeq,
+      captureId: message.capture?.captureId,
+      selectionMethod: message.capture?.selectionMethod,
+      seriesCount: message.capture?.series?.length,
+      series: message.capture?.series?.map(series => ({
+        id: series.id, refId: series.refId, name: series.name, labels: series.labels, pointCount: series.points?.length ?? 0,
+      })),
+      freehandBinding: message.freehandBinding && {
+        id: message.freehandBinding.id,
+        plotRect: message.freehandBinding.plotRect,
+        grafanaVersion: message.freehandBinding.grafanaVersion,
+        uPlotVersion: message.freehandBinding.uPlotVersion,
+      },
+      error: message.error,
+    })));
+    throw new Error(`Freehand action did not open the inspector. dialogs=${JSON.stringify(dialogs)} bridge=${JSON.stringify(bridge)}`);
   }
   return inspector;
 }
@@ -302,6 +456,11 @@ async function openFreehandInspector(page) {
 async function verifyFreehandGesture() {
   const profileDir = await mkdtemp(path.join(os.tmpdir(), 'simurgh-freehand-'));
   let browser;
+  let page;
+  const queries = [];
+  const consoleErrors = [];
+  const consoleEvents = [];
+  const pageErrors = [];
   try {
     browser = await chromium.launchPersistentContext(profileDir, {
       ...browserLaunchOptions(),
@@ -313,15 +472,16 @@ async function verifyFreehandGesture() {
     await rm(profileDir, { recursive: true, force: true });
     throw error;
   }
-  let page;
   try {
     page = await browser.newPage();
-    const queries = [];
-    const consoleErrors = [];
     page.on('console', message => {
+      consoleEvents.push({ type: message.type(), text: message.text(), location: message.location() });
       if (message.type() === 'error' && !(message.location().url.includes('/api/user/stars') && /401/.test(message.text()))) consoleErrors.push(message.text());
     });
-    page.on('pageerror', error => consoleErrors.push(error.message));
+    page.on('pageerror', error => {
+      pageErrors.push(error.message);
+      consoleErrors.push(error.message);
+    });
     page.on('response', response => {
       if (response.url().includes('/api/ds/query') && response.request().method() === 'POST') {
         let requestRange;
@@ -360,8 +520,9 @@ async function verifyFreehandGesture() {
         `Initial freehand attempt failed for an unexpected reason: ${relativeRangeOutcome}`);
       await page.getByRole('button', { name: 'Close', exact: true }).last().click();
       const queryIndex = queries.length;
-      await selectNativeRange(page, warmData.range, warmData.latestSampleTime);
+      const zoom = await selectNativeRange(page, warmData.range, warmData.latestSampleTime);
       await waitForNumericResponse(queries, queryIndex);
+      await waitForNativeCanvasAfterRange(page, zoom.canvasBeforeSignature);
       actual = (await latestNumericResponse(queries)).series;
       inspector = await openFreehandInspector(page);
     }
@@ -508,6 +669,9 @@ async function verifyFreehandGesture() {
       selectedInterval: confirmed.confirmation.range, freehandArtifact, relativeRangeOutcome,
       staleRefreshRejected: true, refreshedBindingAccepted: true, narrowViewportInspectorVisible: true,
       confirmedBundleStableAfterRefresh: true };
+  } catch (error) {
+    await saveFailureEvidence(page, error, 'freehand', consoleEvents, pageErrors, { queries });
+    throw error;
   } finally {
     await browser.close();
     await rm(profileDir, { recursive: true, force: true });
@@ -620,6 +784,7 @@ async function main() {
   const profileDir = await mkdtemp(path.join(os.tmpdir(), 'simurgh-browser-'));
   let context;
   let page;
+  const grafanaQueries = [];
   const consoleEvents = [];
   const pageErrors = [];
   try {
@@ -633,7 +798,6 @@ async function main() {
       ],
     });
     page = await context.newPage();
-    const grafanaQueries = [];
     page.on('pageerror', error => {
       errors.push(error.message);
       pageErrors.push(error.message);
@@ -681,6 +845,7 @@ async function main() {
     const zoom = await selectNativeRange(page, warmData.range, warmData.latestSampleTime);
     await waitUntil(() => grafanaQueries.length > queryCountBeforeZoom, 'Native zoom did not issue a new Grafana data query', 30_000);
     const zoomResponse = await waitForNumericResponse(grafanaQueries, queryCountBeforeZoom);
+    await waitForNativeCanvasAfterRange(page, zoom.canvasBeforeSignature);
     assert.equal(zoomResponse.status, 200, 'Grafana native zoom query failed');
     const nativeSeries = zoomResponse.series;
     assert.ok(nativeSeries.length > 1, `Grafana query returned ${nativeSeries.length} numeric series; expected the real multi-series CPU panel`);
@@ -855,7 +1020,14 @@ async function main() {
       dashboardUrl: page.url(),
       missingExtensionState: 'actionable modal shown',
       missingExtensionMessage: missingExtensionState,
-      nativeZoom: zoom,
+      nativeZoom: {
+        from: zoom.from,
+        to: zoom.to,
+        targetStart: zoom.targetStart,
+        targetEnd: zoom.targetEnd,
+        startRatio: zoom.startRatio,
+        endRatio: zoom.endRatio,
+      },
       isolatedExtension,
       candidateCount: seriesCount,
       chosenSeries: chosenLabel,
@@ -875,7 +1047,7 @@ async function main() {
       expectedAnonymousViewerErrors: expectedConsoleErrors,
     }, null, 2));
   } catch (error) {
-    await saveFailureEvidence(page, error, 'extension', consoleEvents, pageErrors);
+    await saveFailureEvidence(page, error, 'extension', consoleEvents, pageErrors, { queries: grafanaQueries });
     throw error;
   } finally {
     await context?.close();
