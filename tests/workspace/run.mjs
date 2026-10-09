@@ -34,6 +34,11 @@ const fixture = {
   slowTranscription: false,
   speechUnauthorized: false,
   transcriptionError: null,
+  holdInvestigationActive: false,
+  missingInvestigationId: null,
+  missingInvestigationPollRequests: 0,
+  missingInvestigationEventConnections: 0,
+  missingInvestigationEventCloses: 0,
 };
 let browser;
 let server;
@@ -155,11 +160,16 @@ try {
   await context.close();
 
   await verifyVoiceFrozenSelection();
+  await verifyVoiceStopTiming();
   await verifyTranscriptionCancellation();
   await verifyVoiceProviderError();
   await verifySpeechAuthorizationClearsData();
   await verifyAuthRevocationClearsData();
-  const unexpectedConsoleErrors = consoleErrors.filter((message) => !message.includes('401 (Unauthorized)') && !message.includes('503 (Service Unavailable)'));
+  await verifyMissingActiveInvestigation();
+  const expectedNotFoundCount = fixture.missingInvestigationPollRequests;
+  const notFoundErrors = consoleErrors.filter((message) => message.includes('404 (Not Found)'));
+  assert.equal(notFoundErrors.length, expectedNotFoundCount, 'unexpected browser 404 response');
+  const unexpectedConsoleErrors = consoleErrors.filter((message) => !message.includes('401 (Unauthorized)') && !message.includes('503 (Service Unavailable)') && !message.includes('404 (Not Found)'));
   assert.deepEqual(unexpectedConsoleErrors, [], `unexpected browser console errors: ${unexpectedConsoleErrors.join('\n')}`);
   assert.deepEqual(pageErrors, [], `uncaught browser errors: ${pageErrors.join('\n')}`);
   console.log(`Client workspace browser fixture passed. Screenshots and export: ${artifacts}`);
@@ -244,6 +254,47 @@ async function verifyTranscriptionCancellation() {
   await context.close();
 }
 
+async function verifyVoiceStopTiming() {
+  await runVoiceStopTimingCase({ elapsedAtTimerMs: 30_000, stopEventDelayMs: 1_000, expectTranscription: true });
+  await runVoiceStopTimingCase({ elapsedAtTimerMs: 30_100, stopEventDelayMs: 0, expectTranscription: true });
+  await runVoiceStopTimingCase({ elapsedAtTimerMs: 30_251, stopEventDelayMs: 0, expectTranscription: false });
+  await runVoiceStopTimingCase({ elapsedAtTimerMs: 45_000, stopEventDelayMs: 0, expectTranscription: false });
+}
+
+async function runVoiceStopTimingCase({ elapsedAtTimerMs, stopEventDelayMs, expectTranscription }) {
+  resetFixture({ voice: true });
+  const context = await browser.newContext({ viewport: { width: 1000, height: 900 } });
+  const page = await context.newPage();
+  page.setDefaultTimeout(7_000);
+  observe(page);
+  await page.addInitScript(({ elapsedAtTimerMs, stopEventDelayMs }) => {
+    let syntheticNow = Date.now();
+    const realSetTimeout = window.setTimeout.bind(window);
+    window.setTimeout = (callback, delay, ...args) => {
+      if (delay !== 30_000) return realSetTimeout(callback, delay, ...args);
+      return realSetTimeout(() => {
+        syntheticNow += elapsedAtTimerMs;
+        callback(...args);
+        syntheticNow += stopEventDelayMs;
+      }, 700);
+    };
+    Date.now = () => syntheticNow;
+  }, { elapsedAtTimerMs, stopEventDelayMs });
+  await page.goto(baseUrl);
+  await login(page);
+  await importConfirmedCapture(page);
+  await page.getByRole('checkbox', { name: /Attach .*Lab host CPU utilization/ }).check();
+  await page.getByRole('button', { name: 'Record question' }).click();
+  if (expectTranscription) {
+    await page.getByTestId('transcript-review').waitFor({ timeout: 10_000 });
+    assert.equal(fixture.transcriptionRequests.length, 1, 'late onstop event discarded a recording whose stop was requested at the limit');
+  } else {
+    await page.getByRole('alert').filter({ hasText: 'exceeded 30 seconds' }).waitFor();
+    assert.equal(fixture.transcriptionRequests.length, 0, 'background-delayed timer submitted an overlong recording');
+  }
+  await context.close();
+}
+
 async function verifyVoiceProviderError() {
   resetFixture({ voice: true });
   const context = await browser.newContext({ viewport: { width: 1000, height: 900 } });
@@ -297,6 +348,35 @@ async function verifyAuthRevocationClearsData() {
   await page.getByRole('button', { name: 'Refresh workspace' }).click();
   await page.getByRole('heading', { name: 'Sign in' }).waitFor({ timeout: 10_000 });
   assert.equal(await page.getByText('Lab host CPU utilization').count(), 0);
+  await context.close();
+}
+
+async function verifyMissingActiveInvestigation() {
+  resetFixture();
+  const context = await browser.newContext({ viewport: { width: 1000, height: 900 } });
+  const page = await context.newPage();
+  page.setDefaultTimeout(7_000);
+  observe(page);
+  await page.goto(baseUrl);
+  await login(page);
+  await importConfirmedCapture(page);
+  await page.getByRole('checkbox', { name: /Attach .*Lab host CPU utilization/ }).check();
+  await page.request.post(`${baseUrl}/__fixture/missing-active-investigation`);
+  await page.getByLabel('Question', { exact: true }).fill('Why is this investigation unavailable?');
+  await page.getByTestId('start-investigation').click();
+  await page.getByTestId('investigation-result').waitFor();
+  await waitForFixture(() => fixture.missingInvestigationEventConnections === 1, 'Active investigation did not open its event stream');
+  await waitForFixture(() => fixture.missingInvestigationPollRequests === 1, 'Active investigation did not reach its 404 response', 10_000);
+  await page.locator('.global-notice').getByText('This investigation is no longer available.').waitFor();
+  await page.getByRole('heading', { name: 'References' }).waitFor();
+  await page.getByRole('button', { name: 'Sign out' }).waitFor();
+  assert.equal(await page.getByTestId('investigation-result').count(), 0, 'missing investigation remained selected');
+  assert.match(await page.locator('.history-column').innerText(), /No investigations saved/);
+  await page.waitForTimeout(4_500);
+  assert.equal(fixture.missingInvestigationPollRequests, 1, '404 did not stop the active investigation polling interval');
+  assert.equal(fixture.missingInvestigationEventConnections, 1, '404 caused the event stream to reconnect');
+  assert.equal(fixture.missingInvestigationEventCloses, 1, '404 did not close the active event stream');
+  await page.getByRole('button', { name: 'Sign out' }).waitFor();
   await context.close();
 }
 
@@ -407,6 +487,11 @@ function resetFixture({ voice = false } = {}) {
   fixture.slowTranscription = false;
   fixture.speechUnauthorized = false;
   fixture.transcriptionError = null;
+  fixture.holdInvestigationActive = false;
+  fixture.missingInvestigationId = null;
+  fixture.missingInvestigationPollRequests = 0;
+  fixture.missingInvestigationEventConnections = 0;
+  fixture.missingInvestigationEventCloses = 0;
 }
 
 async function waitForFixture(predicate, message, timeoutMs = 7_000) {
@@ -476,6 +561,14 @@ async function route(request, response) {
   const url = new URL(request.url, baseUrl ?? 'http://127.0.0.1');
   const method = request.method ?? 'GET';
   const pathname = url.pathname;
+  if (pathname === '/__fixture/missing-active-investigation' && method === 'POST') {
+    fixture.holdInvestigationActive = true;
+    fixture.missingInvestigationId = null;
+    fixture.missingInvestigationPollRequests = 0;
+    fixture.missingInvestigationEventConnections = 0;
+    fixture.missingInvestigationEventCloses = 0;
+    response.writeHead(204); return response.end();
+  }
   if (pathname === '/__fixture/slow-speech' && method === 'POST') { fixture.slowSpeech = true; response.writeHead(204); return response.end(); }
   if (pathname === '/__fixture/slow-transcription' && method === 'POST') { fixture.slowTranscription = true; response.writeHead(204); return response.end(); }
   if (pathname === '/__fixture/transcription-error' && method === 'POST') { fixture.transcriptionError = 'unavailable'; response.writeHead(204); return response.end(); }
@@ -507,7 +600,8 @@ async function route(request, response) {
       const body = await readJson(request);
       const investigation = recordFrom(body);
       fixture.investigations.unshift(investigation);
-      if (fixture.created === 1) {
+      if (fixture.holdInvestigationActive) fixture.missingInvestigationId = investigation.id;
+      if (fixture.created === 1 && !fixture.holdInvestigationActive) {
         setTimeout(() => {
           const current = fixture.investigations.find((item) => item.id === investigation.id);
           if (current?.status === 'queued') {
@@ -522,6 +616,7 @@ async function route(request, response) {
     const eventRoute = pathname.match(/^\/api\/investigations\/([^/]+)\/events$/);
     if (eventRoute && method === 'GET') {
       const id = decodeURIComponent(eventRoute[1]);
+      if (id === fixture.missingInvestigationId) fixture.missingInvestigationEventConnections += 1;
       response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
       const initial = fixture.investigations.find((item) => item.id === id);
       if (initial) {
@@ -531,7 +626,10 @@ async function route(request, response) {
           response.write(`event: investigation\ndata: ${JSON.stringify({ investigation: current })}\n\n`);
           if (!['queued', 'running'].includes(current.status)) clearInterval(timer);
         }, 80);
-        request.on('close', () => clearInterval(timer));
+        request.on('close', () => {
+          clearInterval(timer);
+          if (id === fixture.missingInvestigationId) fixture.missingInvestigationEventCloses += 1;
+        });
       } else response.end();
       return;
     }
@@ -563,7 +661,12 @@ async function route(request, response) {
     }
     const investigation = pathname.match(/^\/api\/investigations\/([^/]+)$/);
     if (investigation && method === 'GET') {
-      const found = fixture.investigations.find((item) => item.id === decodeURIComponent(investigation[1]));
+      const id = decodeURIComponent(investigation[1]);
+      if (id === fixture.missingInvestigationId) {
+        fixture.missingInvestigationPollRequests += 1;
+        return json(response, 404, { error: { code: 'not_found', message: 'Not found.' } });
+      }
+      const found = fixture.investigations.find((item) => item.id === id);
       return found ? json(response, 200, { investigation: found }) : json(response, 404, { error: { code: 'not_found', message: 'Not found.' } });
     }
     const cancel = pathname.match(/^\/api\/investigations\/([^/]+)\/cancel$/);

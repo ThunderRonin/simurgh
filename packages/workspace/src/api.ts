@@ -21,7 +21,7 @@ export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<
   const headers = new Headers(init.headers);
   if (init.body !== undefined && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
   const response = await fetch(path, { ...init, headers, credentials: 'same-origin' });
-  if (response.status === 401 || response.status === 404) throw new WorkspaceSessionExpiredError(response.status);
+  if (response.status === 401) throw new WorkspaceSessionExpiredError(response.status);
   if (!response.ok) throw await responseError(response);
   if (response.status === 204) return undefined as T;
   return await response.json() as T;
@@ -29,7 +29,7 @@ export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<
 
 export async function apiDownload(path: string): Promise<{ blob: Blob; filename: string }> {
   const response = await fetch(path, { credentials: 'same-origin' });
-  if (response.status === 401 || response.status === 404) throw new WorkspaceSessionExpiredError(response.status);
+  if (response.status === 401) throw new WorkspaceSessionExpiredError(response.status);
   if (!response.ok) throw await responseError(response);
   const disposition = response.headers.get('Content-Disposition') ?? '';
   const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] ?? 'simurgh-investigation.json';
@@ -44,7 +44,7 @@ export async function apiWav(path: string, signal: AbortSignal): Promise<{ blob:
     credentials: 'same-origin',
     signal,
   });
-  if (response.status === 401 || response.status === 404) throw new WorkspaceSessionExpiredError(response.status);
+  if (response.status === 401) throw new WorkspaceSessionExpiredError(response.status);
   if (!response.ok) throw await responseError(response);
   const contentType = (response.headers.get('Content-Type') ?? '').split(';', 1)[0].trim().toLowerCase();
   if (contentType !== 'audio/wav' && contentType !== 'audio/x-wav') {

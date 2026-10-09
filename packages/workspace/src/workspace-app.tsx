@@ -16,6 +16,9 @@ import {
 import type { ConfirmedCapture } from '../../shared/src/index';
 import type { SourceSnapshot } from '../../shared/src/source';
 
+// Match the decoder's 250 ms tolerance while still rejecting delayed background timers.
+const VOICE_STOP_TOLERANCE_MS = 250;
+
 type SessionPhase = 'checking' | 'signed-out' | 'signed-in' | 'error';
 
 interface SessionPayload {
@@ -219,9 +222,17 @@ function Workspace({ user, onSessionExpired }: { user: WorkspaceUser; onSessionE
   useEffect(() => {
     if (!activeInvestigation || !isActive(activeInvestigation.status)) return;
     let closed = false;
+    let poll: number | null = null;
     const url = `/api/investigations/${encodeURIComponent(activeInvestigation.id)}/events`;
     const source = new EventSource(url);
+    const stopUpdates = () => {
+      if (closed) return;
+      closed = true;
+      source.close();
+      if (poll !== null) window.clearInterval(poll);
+    };
     const onInvestigation = (event: Event) => {
+      if (closed) return;
       try {
         const update = JSON.parse((event as MessageEvent<string>).data) as { investigation?: InvestigationRecord };
         if (update.investigation?.id === activeInvestigation.id) {
@@ -232,8 +243,8 @@ function Workspace({ user, onSessionExpired }: { user: WorkspaceUser; onSessionE
       }
     };
     source.addEventListener('investigation', onInvestigation);
-    source.onerror = () => setNotice('Live updates are reconnecting; the current investigation is still available.');
-    const poll = window.setInterval(async () => {
+    source.onerror = () => { if (!closed) setNotice('Live updates are reconnecting; the current investigation is still available.'); };
+    poll = window.setInterval(async () => {
       try {
         const payload = await apiJson<ApiInvestigationPayload>(`/api/investigations/${encodeURIComponent(activeInvestigation.id)}`);
         if (!closed && payload.investigation?.id === activeInvestigation.id) {
@@ -241,13 +252,16 @@ function Workspace({ user, onSessionExpired }: { user: WorkspaceUser; onSessionE
         }
       } catch (error) {
         if (error instanceof WorkspaceSessionExpiredError) clearSensitiveState();
-        else if (!closed) setNotice('Could not refresh investigation status.');
+        else if (!closed && error instanceof WorkspaceApiError && error.status === 404) {
+          stopUpdates();
+          setInvestigations((items) => items.filter((item) => item.id !== activeInvestigation.id));
+          setSelectedInvestigationId((selected) => selected === activeInvestigation.id ? null : selected);
+          setNotice('This investigation is no longer available.');
+        } else if (!closed) setNotice('Could not refresh investigation status.');
       }
     }, 4_000);
     return () => {
-      closed = true;
-      source.close();
-      window.clearInterval(poll);
+      stopUpdates();
     };
   }, [activeInvestigation?.id, activeInvestigation?.status]);
 
@@ -875,6 +889,7 @@ function VoiceQuestion({
   const stream = useRef<MediaStream | null>(null);
   const chunks = useRef<Blob[]>([]);
   const startedAt = useRef(0);
+  const stopRequestedAt = useRef<number | null>(null);
   const limitTimer = useRef<number | null>(null);
   const permissionGeneration = useRef(0);
   const transcriptionController = useRef<AbortController | null>(null);
@@ -885,6 +900,7 @@ function VoiceQuestion({
     stream.current?.getTracks().forEach((track) => track.stop());
     stream.current = null;
     chunks.current = [];
+    stopRequestedAt.current = null;
     recorder.current = null;
   };
 
@@ -956,10 +972,10 @@ function VoiceQuestion({
       };
       nextRecorder.onstop = () => {
         if (generation !== permissionGeneration.current) return;
-        const duration = Date.now() - startedAt.current;
+        const duration = (stopRequestedAt.current ?? Date.now()) - startedAt.current;
         const audio = new Blob(chunks.current, { type: nextRecorder.mimeType || 'application/octet-stream' });
         releaseMedia();
-        if (duration > MAX_VOICE_SECONDS * 1_000 || audio.size > MAX_VOICE_BYTES || audio.size === 0) {
+        if (duration > MAX_VOICE_SECONDS * 1_000 + VOICE_STOP_TOLERANCE_MS || audio.size > MAX_VOICE_BYTES || audio.size === 0) {
           setState('idle');
           setError(audio.size > MAX_VOICE_BYTES
             ? 'Recording exceeded the 2 MiB limit and was discarded.'
@@ -970,10 +986,11 @@ function VoiceQuestion({
         void transcribe(audio, frozen);
       };
       startedAt.current = Date.now();
+      stopRequestedAt.current = null;
       nextRecorder.start(250);
       setState('recording');
       limitTimer.current = window.setTimeout(() => {
-        if (recorder.current?.state === 'recording') recorder.current.stop();
+        stopRecording();
       }, MAX_VOICE_SECONDS * 1_000);
     } catch {
       if (generation !== permissionGeneration.current) return;
@@ -1016,7 +1033,10 @@ function VoiceQuestion({
   };
 
   const stopRecording = () => {
-    if (recorder.current?.state === 'recording') recorder.current.stop();
+    if (recorder.current?.state === 'recording') {
+      stopRequestedAt.current = Date.now();
+      recorder.current.stop();
+    }
   };
 
   const speak = () => {
