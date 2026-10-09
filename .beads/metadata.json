@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "simurgh",
+  "project_id": "a6eff974-9df2-4aa0-aeb3-f78a91e72c36"
+}
