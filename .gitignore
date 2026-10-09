@@ -10,6 +10,7 @@
 .agents/
 .claude/
 .codex/
+.codebase-memory/
 .cursor/
 .playwright-cli/
 work/
@@ -19,7 +20,11 @@ SIMURGH-BRIEF.pdf
 .env
 node_modules/
 dist/
+dist-firefox/
 coverage/
 test-results/
 playwright-report/
 tests/browser/artifacts/
+packages/vscode-extension/.vscode-test/
+scripts/__pycache__/
+tests/release/__pycache__/

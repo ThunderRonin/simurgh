@@ -1,0 +1,31 @@
+{
+  "name": "@simurgh/vscode-extension",
+  "version": "0.0.1",
+  "private": true,
+  "license": "Apache-2.0",
+  "icon": "simurgh-logo.png",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onCommand:simurgh.captureSelection"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "simurgh.captureSelection",
+        "title": "Simurgh: Capture Selected Source"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:host": "npm run build && node test/runHost.mjs"
+  },
+  "devDependencies": {
+    "@types/vscode": "1.137.0",
+    "@vscode/test-electron": "2.5.2"
+  }
+}

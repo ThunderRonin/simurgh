@@ -1,0 +1,28 @@
+{
+  "telemetry": {
+    "origin": "http://127.0.0.1:3300",
+    "orgId": 1,
+    "dashboardUid": "simurgh-cpu-lab",
+    "panelId": 1,
+    "datasourceUid": "prometheus-local",
+    "template": "100 * (1 - sum by (cpu) (rate(node_cpu_seconds_total{job=\"simurgh-lab-host\", telemetry_host=\"simurgh-lab-host\", instance=~\"$host\", mode=\"idle\"}[1m])))",
+    "expression": "100 * (1 - sum by (cpu) (rate(node_cpu_seconds_total{job=\"simurgh-lab-host\", telemetry_host=\"simurgh-lab-host\", instance=~\"node-exporter:9100\", mode=\"idle\"}[1m])))",
+    "variables": {
+      "host": "node-exporter:9100"
+    },
+    "labels": {
+      "cpu": ["0"]
+    },
+    "maxSpanMs": 900000,
+    "maxAgeMs": 86400000,
+    "stepSeconds": 15
+  },
+  "codex": {
+    "executable": "/absolute/path/to/codex",
+    "home": "/absolute/private/path/codex-home",
+    "cwd": "/absolute/private/path/empty-codex-cwd",
+    "model": "gpt-6.1-sol",
+    "provider": "openai",
+    "isolationQualified": false
+  }
+}

@@ -72,7 +72,10 @@ export async function buildPanelCapture(context: CaptureContext, origin: string,
   if (queries.some((query) => (query.expression ?? '').includes('$') && !query.executedQueryString)) {
     throw new Error('Grafana did not provide the executed query text needed to resolve template variables safely.');
   }
-  const variables = extractScopedVariables(context, data, queries);
+  const variableNames = referencedTemplateVariables(queries);
+  const variables = extractScopedVariables(context, data, variableNames);
+  const variablesWithStructuredValues = new Set(variables.map((item) => item.name));
+  const variablesWithoutStructuredValues = variableNames.filter((name) => !variablesWithStructuredValues.has(name));
   const queryInterval = typeof data.request?.interval === 'string' ? data.request.interval : undefined;
   const queryIntervalMs = typeof data.request?.intervalMs === 'number' && Number.isFinite(data.request.intervalMs) ? data.request.intervalMs : undefined;
   const structureRev = data.structureRev;
@@ -102,6 +105,17 @@ export async function buildPanelCapture(context: CaptureContext, origin: string,
   const revisionSeed = JSON.stringify({ structureRev, range, queries, series });
   const revision = await digest(revisionSeed);
 
+  const limitations = [
+    'No panel image is captured; the selection uses Grafana native time-range zoom.',
+    'The scrape interval was not available from public panel metadata and was not inferred from query resolution.',
+    'The selected time range cannot establish event duration below the captured sample spacing.',
+  ];
+  if (variablesWithoutStructuredValues.length > 0) {
+    const namedVariables = variablesWithoutStructuredValues.slice(0, 20).map((name) => `\`${name.slice(0, 64)}\``).join(', ');
+    const omitted = variablesWithoutStructuredValues.length > 20 ? ' and additional variables' : '';
+    limitations.push(`Structured scoped values were unavailable for Grafana template variable(s): ${namedVariables}${omitted}. Original selected values are unknown; executed query text is retained separately.`);
+  }
+
   return {
     schema: 'simurgh.capture',
     version: 1,
@@ -124,11 +138,7 @@ export async function buildPanelCapture(context: CaptureContext, origin: string,
     variables,
     query: queries,
     series,
-    limitations: [
-      'No panel image is captured; the selection uses Grafana native time-range zoom.',
-      'The scrape interval was not available from public panel metadata and was not inferred from query resolution.',
-      'The selected time range cannot establish event duration below the captured sample spacing.',
-    ],
+    limitations,
   };
 }
 
@@ -255,12 +265,16 @@ function sampleSpacing(series: ReturnType<typeof extractNumericSeries>): number 
   return spacing;
 }
 
-function extractScopedVariables(context: CaptureContext, data: NonNullable<CaptureContext['data']>, queries: CaptureQuery[]) {
+function referencedTemplateVariables(queries: CaptureQuery[]): string[] {
   const names = new Set<string>();
   for (const query of queries) {
     const source = `${query.expression ?? ''} ${query.executedQueryString ?? ''}`;
     for (const match of source.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g)) names.add(match[1]);
   }
+  return [...names].sort();
+}
+
+function extractScopedVariables(context: CaptureContext, data: NonNullable<CaptureContext['data']>, names: string[]) {
   const requestScopes = isRecord(data.request?.scopedVars) ? data.request?.scopedVars : {};
   const contextScopes = isRecord(context.scopedVars) ? context.scopedVars : {};
   const scope = { ...contextScopes, ...requestScopes };

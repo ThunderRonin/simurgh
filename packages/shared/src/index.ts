@@ -5,6 +5,9 @@ export const INTEGRATION_ID = 'simurgh-context-app' as const;
 export const MAX_CAPTURE_BYTES = 5_000_000;
 export const MAX_SERIES = 100;
 export const MAX_POINTS_PER_SERIES = 10_000;
+export const FREEHAND_GRAFANA_VERSION = '13.2.3' as const;
+export const FREEHAND_UPLOT_VERSION = '1.6.32' as const;
+export const MAX_FREEHAND_VERTICES = 256;
 
 export interface AbsoluteRange {
   from: number;
@@ -40,7 +43,7 @@ export interface CaptureSnapshot {
   captureId: string;
   revision: string;
   capturedAt: string;
-  selectionMethod: 'grafana-native-range';
+  selectionMethod: 'grafana-native-range' | 'grafana-freehand';
   panel: {
     grafanaOrigin: string;
     grafanaOrgId: number;
@@ -64,12 +67,33 @@ export interface CaptureSnapshot {
   variables: Array<{ name: string; values: string[] }>;
   query: CaptureQuery[];
   series: NumericSeries[];
+  freehand?: FreehandSelection;
   limitations: string[];
   visual?: {
     mediaType: 'image/png';
     dataUrl: string;
     trustedForSelection: false;
   };
+}
+
+export interface FreehandSelection {
+  renderer: 'grafana-uplot';
+  grafanaVersion: typeof FREEHAND_GRAFANA_VERSION;
+  uPlotVersion: typeof FREEHAND_UPLOT_VERSION;
+  plotSize: { width: number; height: number };
+  vertices: Array<{ x: number; y: number }>;
+  interval: AbsoluteRange;
+  candidates: Array<{ seriesId: string; sampleCount: number; pointIndexes: number[] }>;
+  confirmedSeriesId?: string;
+  confirmedPointIndexes?: number[];
+}
+
+export interface FreehandPlotBinding {
+  id: string;
+  captureId: string;
+  grafanaVersion: typeof FREEHAND_GRAFANA_VERSION;
+  uPlotVersion: typeof FREEHAND_UPLOT_VERSION;
+  plotRect: { left: number; top: number; width: number; height: number };
 }
 
 export interface ConfirmedCapture extends CaptureSnapshot {
@@ -242,10 +266,15 @@ export type BridgeMessage = {
   channel: typeof BRIDGE_CHANNEL;
   version: typeof BRIDGE_VERSION;
   integrationId: typeof INTEGRATION_ID;
-  kind: 'hello' | 'plugin-ready' | 'probe' | 'ready' | 'capture';
+  kind: 'hello' | 'plugin-ready' | 'probe' | 'ready' | 'capture' | 'freehand-submit' | 'freehand-error' | 'freehand-cancel' | 'freehand-complete';
   sessionId: string;
   requestSeq: number;
   capture?: CaptureSnapshot;
+  freehandBinding?: FreehandPlotBinding;
+  bindingId?: string;
+  captureId?: string;
+  vertices?: Array<{ x: number; y: number }>;
+  error?: string;
 };
 
 export function isBridgeMessage(
@@ -266,14 +295,36 @@ export function isBridgeMessage(
   if (input.channel !== BRIDGE_CHANNEL || input.version !== BRIDGE_VERSION || input.integrationId !== INTEGRATION_ID ||
     input.sessionId !== context.sessionId || input.requestSeq !== context.requestSeq ||
     !Number.isSafeInteger(input.requestSeq) || input.requestSeq < 0 ||
-    !['hello', 'plugin-ready', 'probe', 'ready', 'capture'].includes(String(input.kind))) {
+    !['hello', 'plugin-ready', 'probe', 'ready', 'capture', 'freehand-submit', 'freehand-error', 'freehand-cancel', 'freehand-complete'].includes(String(input.kind))) {
     return false;
   }
   if (input.kind === 'capture') {
     const result = validateCapture(input.capture);
-    return result.ok && result.value.sessionId === input.sessionId && result.value.panel.grafanaOrigin === context.expectedOrigin;
+    if (!result.ok || result.value.sessionId !== input.sessionId || result.value.panel.grafanaOrigin !== context.expectedOrigin) return false;
+    return input.freehandBinding === undefined || isFreehandBinding(input.freehandBinding, result.value);
   }
+  if (input.kind === 'freehand-submit') return validFreehandSubmit(input);
+  if (input.kind === 'freehand-error') return isNonEmptyString(input.error) && input.error.length <= 500;
+  if (input.kind === 'freehand-cancel') return isNonEmptyString(input.captureId) &&
+    (input.bindingId === undefined || isNonEmptyString(input.bindingId));
+  if (input.kind === 'freehand-complete') return isNonEmptyString(input.captureId);
   return input.capture === undefined;
+}
+
+function isFreehandBinding(input: unknown, capture: CaptureSnapshot): input is FreehandPlotBinding {
+  if (!isRecord(input) || !isNonEmptyString(input.id) || input.captureId !== capture.captureId ||
+    input.grafanaVersion !== FREEHAND_GRAFANA_VERSION || input.uPlotVersion !== FREEHAND_UPLOT_VERSION ||
+    !isRecord(input.plotRect) || !['left', 'top', 'width', 'height'].every((key) => typeof input.plotRect[key] === 'number' && Number.isFinite(input.plotRect[key]))) {
+    return false;
+  }
+  return input.plotRect.width >= 1 && input.plotRect.width <= 10_000 && input.plotRect.height >= 1 && input.plotRect.height <= 10_000;
+}
+
+function validFreehandSubmit(input: Record<string, unknown>): boolean {
+  return isNonEmptyString(input.captureId) && isNonEmptyString(input.bindingId) && Array.isArray(input.vertices) &&
+    input.vertices.length >= 3 && input.vertices.length <= MAX_FREEHAND_VERTICES &&
+    input.vertices.every((point) => isRecord(point) && typeof point.x === 'number' && Number.isFinite(point.x) &&
+      typeof point.y === 'number' && Number.isFinite(point.y));
 }
 
 export function validateCapture(input: unknown): { ok: true; value: CaptureSnapshot } | { ok: false; reason: string } {
@@ -290,7 +341,7 @@ export function validateCapture(input: unknown): { ok: true; value: CaptureSnaps
     return { ok: false, reason: 'Capture exceeds the 5 MB payload limit.' };
   }
   if (input.schema !== CAPTURE_SCHEMA || input.version !== 1 || input.integrationId !== INTEGRATION_ID ||
-    input.selectionMethod !== 'grafana-native-range') {
+    !['grafana-native-range', 'grafana-freehand'].includes(String(input.selectionMethod))) {
     return { ok: false, reason: 'Capture schema or selection method is unsupported.' };
   }
   if (!isNonEmptyString(input.sessionId) || !isNonEmptyString(input.captureId) || !isNonEmptyString(input.revision) ||
@@ -323,6 +374,11 @@ export function validateCapture(input: unknown): { ok: true; value: CaptureSnaps
   if (new Set(input.series.map((item) => isRecord(item) ? item.id : undefined)).size !== input.series.length) {
     return { ok: false, reason: 'Capture contains duplicate series identities.' };
   }
+  const confirmedCount = Number.isInteger(input.candidateCount) ? Number(input.candidateCount) : undefined;
+  if (input.selectionMethod === 'grafana-native-range' && input.freehand !== undefined ||
+    input.selectionMethod === 'grafana-freehand' && !validFreehand(input.freehand, range, series, confirmedCount)) {
+    return { ok: false, reason: 'Capture freehand geometry does not match its native renderer, range, or real series samples.' };
+  }
   if (input.visual !== undefined && (!isRecord(input.visual) || input.visual.mediaType !== 'image/png' ||
     input.visual.trustedForSelection !== false || typeof input.visual.dataUrl !== 'string' || !input.visual.dataUrl.startsWith('data:image/png;base64,'))) {
     return { ok: false, reason: 'Optional visual reference must be a non-authoritative PNG data URL.' };
@@ -348,7 +404,14 @@ export function confirmCapture(
   if (!candidate) {
     throw new Error('Choose an available numeric series before confirming.');
   }
-  const points = candidate.points.filter((point) => point.time >= interval.from && point.time <= interval.to).map((point) => ({ ...point }));
+  const freehandCandidate = capture.freehand?.candidates.find((item) => item.seriesId === seriesId);
+  if (capture.selectionMethod === 'grafana-freehand' && !freehandCandidate) {
+    throw new Error('Choose a freehand candidate that contains enclosed native samples.');
+  }
+  const enclosedIndexes = freehandCandidate ? new Set(freehandCandidate.pointIndexes) : null;
+  const selectedEntries = candidate.points.flatMap((point, index) => point.time >= interval.from && point.time <= interval.to &&
+    (enclosedIndexes === null || enclosedIndexes.has(index)) ? [{ point: { ...point }, index }] : []);
+  const points = selectedEntries.map(({ point }) => point);
   const limitations = [...capture.limitations];
   const spacing = minimumSpacing(candidate.points);
   if (points.length < 2 || spacing !== null && interval.to - interval.from < spacing) {
@@ -356,8 +419,13 @@ export function confirmCapture(
   }
   const confirmed = cloneJson({
     ...capture,
-    candidateCount: capture.series.length,
+    candidateCount: capture.freehand?.candidates.length ?? capture.series.length,
     series: [{ ...candidate, points }],
+    ...(capture.freehand ? { freehand: {
+      ...capture.freehand,
+      confirmedSeriesId: seriesId,
+      confirmedPointIndexes: selectedEntries.map(({ index }) => index),
+    } } : {}),
     confirmation: { seriesId, range: interval, confirmedAt },
     selected: { ...candidate, points },
     limitations: [...new Set(limitations)],
@@ -372,6 +440,57 @@ function validPanel(value: unknown): value is CaptureSnapshot['panel'] {
     isNonEmptyString(value.dashboardTitle) && Number.isInteger(value.panelId) && value.panelId >= 0 &&
     isNonEmptyString(value.panelTitle) && isNonEmptyString(value.datasourceUid) && isNonEmptyString(value.datasourceType) &&
     (value.defaultUnit === undefined || typeof value.defaultUnit === 'string');
+}
+
+function validFreehand(value: unknown, captureRange: AbsoluteRange, series: NumericSeries[], confirmedCount?: number): value is FreehandSelection {
+  if (!isRecord(value) || value.renderer !== 'grafana-uplot' || value.grafanaVersion !== FREEHAND_GRAFANA_VERSION ||
+    value.uPlotVersion !== FREEHAND_UPLOT_VERSION || !isRecord(value.plotSize) ||
+    typeof value.plotSize.width !== 'number' || !Number.isFinite(value.plotSize.width) || value.plotSize.width < 1 || value.plotSize.width > 10_000 ||
+    typeof value.plotSize.height !== 'number' || !Number.isFinite(value.plotSize.height) || value.plotSize.height < 1 || value.plotSize.height > 10_000 ||
+    !Array.isArray(value.vertices) || value.vertices.length < 3 || value.vertices.length > MAX_FREEHAND_VERTICES ||
+    !value.vertices.every((point) => isRecord(point) && typeof point.x === 'number' && Number.isFinite(point.x) && point.x >= 0 && point.x <= value.plotSize.width &&
+      typeof point.y === 'number' && Number.isFinite(point.y) && point.y >= 0 && point.y <= value.plotSize.height) ||
+    !Array.isArray(value.candidates) || value.candidates.length === 0 || value.candidates.length > (confirmedCount ?? series.length) ||
+    confirmedCount !== undefined && (!Number.isInteger(confirmedCount) || confirmedCount < 1 || confirmedCount > MAX_SERIES)) {
+    return false;
+  }
+  const interval = parseAbsoluteRange(value.interval);
+  if (!interval || interval.from < captureRange.from || interval.to > captureRange.to) return false;
+  let twiceArea = 0;
+  for (let index = 0; index < value.vertices.length; index += 1) {
+    const point = value.vertices[index];
+    const next = value.vertices[(index + 1) % value.vertices.length];
+    twiceArea += point.x * next.y - next.x * point.y;
+  }
+  if (Math.abs(twiceArea) < 4) return false;
+
+  const byId = new Map(series.map((item) => [item.id, item]));
+  const seen = new Set<string>();
+  const validCandidates = value.candidates.every((candidate) => {
+    if (!isRecord(candidate) || typeof candidate.seriesId !== 'string' || seen.has(candidate.seriesId) ||
+      !Array.isArray(candidate.pointIndexes) || candidate.pointIndexes.length === 0 || candidate.pointIndexes.length > MAX_POINTS_PER_SERIES) return false;
+    const source = byId.get(candidate.seriesId);
+    if (typeof candidate.sampleCount !== 'number' || !Number.isInteger(candidate.sampleCount) || candidate.sampleCount < 1 ||
+      candidate.sampleCount > MAX_POINTS_PER_SERIES || (!confirmedCount && (!source || candidate.sampleCount !== source.points.length)) ||
+      (confirmedCount && source && candidate.sampleCount < source.points.length) || (confirmedCount && !source && candidate.seriesId === value.confirmedSeriesId)) return false;
+    seen.add(candidate.seriesId);
+    let previous = -1;
+    return candidate.pointIndexes.every((pointIndex) => {
+      if (!Number.isInteger(pointIndex) || pointIndex <= previous || pointIndex < 0 || pointIndex >= candidate.sampleCount) return false;
+      previous = pointIndex;
+      const time = confirmedCount === undefined ? source?.points[pointIndex]?.time : undefined;
+      return time === undefined || time >= interval.from && time <= interval.to;
+    });
+  });
+  if (!validCandidates) return false;
+  if (confirmedCount === undefined) return value.confirmedSeriesId === undefined && value.confirmedPointIndexes === undefined;
+  const selected = value.candidates.find((candidate) => candidate.seriesId === value.confirmedSeriesId);
+  const selectedSeries = series.length === 1 ? series[0] : undefined;
+  return confirmedCount === value.candidates.length && !!selected && !!selectedSeries &&
+    selectedSeries.id === value.confirmedSeriesId && Array.isArray(value.confirmedPointIndexes) &&
+    selectedSeries.points.every((point) => point.time >= interval.from && point.time <= interval.to) &&
+    value.confirmedPointIndexes.length === selectedSeries.points.length && value.confirmedPointIndexes.every((index, position) =>
+      Number.isInteger(index) && (position === 0 || index > value.confirmedPointIndexes![position - 1]) && selected.pointIndexes.includes(index));
 }
 
 function validQuery(value: unknown): value is CaptureQuery {

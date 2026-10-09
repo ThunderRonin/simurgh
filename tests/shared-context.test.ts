@@ -123,6 +123,66 @@ describe('shared capture contract', () => {
     expect(confirmed.selected.points).toEqual([{ time: 2000, value: 0.6 }]);
     expect(confirmed.limitations).toContain('The selected interval is shorter than the available sample spacing.');
   });
+
+  it('validates native freehand geometry and confirms only samples enclosed for the chosen series', () => {
+    const capture = freehandCapture();
+    expect(validateCapture(capture).ok).toBe(true);
+
+    const confirmed = confirmCapture(capture, capture.series[0].id, { from: 1000, to: 3000 });
+    expect(confirmed.selectionMethod).toBe('grafana-freehand');
+    expect(confirmed.confirmation.range).toEqual({ from: 1000, to: 3000 });
+    expect(confirmed.selected.points).toEqual([{ time: 2000, value: 0.6 }]);
+    expect(confirmed.freehand?.candidates[0].pointIndexes).toEqual([1]);
+    expect(Object.isFrozen(confirmed.freehand?.vertices)).toBe(true);
+    expect(validateCapture(confirmed).ok).toBe(true);
+    const forgedOutsideGeometry = {
+      ...confirmed,
+      series: [{ ...confirmed.series[0], points: [{ time: 500, value: 0.6 }] }],
+      selected: { ...confirmed.selected, points: [{ time: 500, value: 0.6 }] },
+    };
+    expect(validateCapture(forgedOutsideGeometry).ok).toBe(false);
+  });
+
+  it('rejects unsupported renderer versions and out-of-range freehand sample indexes', () => {
+    const capture = freehandCapture();
+    expect(validateCapture({ ...capture, freehand: { ...capture.freehand, grafanaVersion: '13.2.4' } }).ok).toBe(false);
+    expect(validateCapture({ ...capture, freehand: { ...capture.freehand, candidates: [{ seriesId: capture.series[0].id, pointIndexes: [3] }] } }).ok).toBe(false);
+    expect(validateCapture({ ...capture, freehand: { ...capture.freehand, vertices: [{ x: 12, y: 12 }, { x: 50, y: 20 }] } }).ok).toBe(false);
+  });
+
+  it('requires the explicitly chosen freehand candidate to have enclosed real samples', () => {
+    const capture = freehandCapture();
+    const notEnclosed = { ...capture.series[0], id: 'A:node_cpu:Value:cpu=1', labels: { cpu: '1', instance: 'node-a' } };
+    capture.series.push(notEnclosed);
+    expect(() => confirmCapture(capture, notEnclosed.id, { from: 1000, to: 3000 })).toThrow(/freehand candidate/i);
+  });
+
+  it('accepts a bounded renderer binding and rejects malformed or stale gesture envelopes', () => {
+    const capture = validCapture();
+    const binding = {
+      id: 'binding-1', captureId: capture.captureId, grafanaVersion: '13.2.3', uPlotVersion: '1.6.32',
+      plotRect: { left: 100, top: 80, width: 400, height: 200 },
+    };
+    const captureMessage = { channel: 'simurgh.context', version: 1, integrationId: 'simurgh-context-app',
+      kind: 'capture', sessionId: capture.sessionId, requestSeq: 3, capture, freehandBinding: binding };
+    const gesture = { channel: 'simurgh.context', version: 1, integrationId: 'simurgh-context-app',
+      kind: 'freehand-submit', sessionId: capture.sessionId, requestSeq: 3, captureId: capture.captureId,
+      bindingId: binding.id, vertices: [{ x: 10, y: 20 }, { x: 60, y: 20 }, { x: 60, y: 70 }, { x: 10, y: 70 }] };
+    const allowed = { source: 'window', origin: 'http://localhost:3300', expectedOrigin: 'http://localhost:3300',
+      sessionId: capture.sessionId, requestSeq: 3 };
+    expect(isBridgeMessage(captureMessage, allowed)).toBe(true);
+    expect(isBridgeMessage({ ...captureMessage, freehandBinding: { ...binding, captureId: 'stale' } }, allowed)).toBe(false);
+    expect(isBridgeMessage(gesture, allowed)).toBe(true);
+    expect(isBridgeMessage({ ...gesture, requestSeq: 2 }, allowed)).toBe(false);
+    expect(isBridgeMessage({ ...gesture, vertices: [{ x: 1, y: 2 }] }, allowed)).toBe(false);
+    expect(isBridgeMessage({ ...gesture, kind: 'freehand-cancel', vertices: undefined, captureId: undefined }, allowed)).toBe(false);
+    expect(isBridgeMessage({ ...gesture, kind: 'freehand-cancel', vertices: undefined, captureId: capture.captureId }, allowed)).toBe(true);
+    const completion = { ...gesture, kind: 'freehand-complete' as const, vertices: undefined, captureId: capture.captureId };
+    expect(isBridgeMessage(completion, allowed)).toBe(true);
+    expect(isBridgeMessage({ ...completion, captureId: undefined }, allowed)).toBe(false);
+    expect(isBridgeMessage({ ...completion, sessionId: 'stale-session' }, allowed)).toBe(false);
+    expect(isBridgeMessage({ ...completion, requestSeq: 4 }, allowed)).toBe(false);
+  });
 });
 
 function validCapture(): CaptureSnapshot {
@@ -159,5 +219,22 @@ function validCapture(): CaptureSnapshot {
       points: [{ time: 1000, value: 0.4 }, { time: 2000, value: 0.6 }, { time: 3000, value: 0.8 }],
     }],
     limitations: [],
+  };
+}
+
+function freehandCapture(): CaptureSnapshot {
+  const capture = validCapture();
+  return {
+    ...capture,
+    selectionMethod: 'grafana-freehand',
+    freehand: {
+      renderer: 'grafana-uplot',
+      grafanaVersion: '13.2.3',
+      uPlotVersion: '1.6.32',
+      plotSize: { width: 400, height: 200 },
+      vertices: [{ x: 10, y: 10 }, { x: 90, y: 10 }, { x: 90, y: 90 }, { x: 10, y: 90 }],
+      interval: { from: 1000, to: 3000 },
+      candidates: [{ seriesId: capture.series[0].id, sampleCount: capture.series[0].points.length, pointIndexes: [1] }],
+    },
   };
 }

@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { freehandPathAroundSamples, pointInPolygon } from './freehand-geometry.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const extensionDir = path.resolve(
@@ -198,26 +200,108 @@ async function findPanelMenu(page) {
   throw new Error('Could not find the native Grafana panel menu button');
 }
 
-async function openSimurghMenuAction(page) {
+async function openSimurghMenuAction(page, actionTitle = 'Inspect with Simurgh') {
   const menu = await findPanelMenu(page);
   await menu.click();
+  const panelMenu = page.getByRole('menu').last();
+  await panelMenu.waitFor({ state: 'visible', timeout: 10_000 });
+  await moveMenuFocusWithKeyboard(page, panelMenu, 'Extensions');
   const extensions = page.getByRole('menuitem', { name: 'Extensions', exact: true });
-  await extensions.waitFor({ state: 'visible', timeout: 10_000 });
-  await extensions.click();
-  const action = page.getByRole('menuitem', { name: 'Inspect with Simurgh', exact: true });
-  await action.waitFor({ state: 'visible', timeout: 10_000 });
+  assert.equal(await extensions.getAttribute('aria-haspopup'), 'menu', 'Grafana Extensions entry is not a submenu');
+  await page.keyboard.press('ArrowRight');
+  const action = page.getByRole('menuitem', { name: actionTitle, exact: true });
+  try {
+    await action.waitFor({ state: 'visible', timeout: 10_000 });
+  } catch (error) {
+    await saveFailureEvidence(page, error, `menu-${actionTitle.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}`, [], []);
+    throw error;
+  }
+  const submenu = page.getByRole('menu').last();
+  await moveMenuFocusWithKeyboard(page, submenu, actionTitle);
   return action;
 }
 
-async function saveFailureEvidence(page, error, contextName, consoleEvents, pageErrors) {
+async function moveMenuFocusWithKeyboard(page, menu, targetName) {
+  const itemCount = await menu.getByRole('menuitem').count();
+  assert.ok(itemCount > 0, `Grafana menu has no keyboard-navigable items while seeking "${targetName}"`);
+  for (let step = 0; step <= itemCount; step += 1) {
+    const active = await page.evaluate(() => {
+      const element = document.activeElement;
+      return element?.getAttribute('role') === 'menuitem' ? element.innerText.trim().replace(/\s+/g, ' ') : null;
+    });
+    if (active === targetName) return;
+    await page.keyboard.press('ArrowDown');
+  }
+  const active = await page.evaluate(() => ({
+    role: document.activeElement?.getAttribute('role'),
+    name: document.activeElement?.innerText?.trim().replace(/\s+/g, ' '),
+  }));
+  throw new Error(`Grafana keyboard navigation did not focus "${targetName}" in its menu: ${JSON.stringify(active)}`);
+}
+
+async function saveFailureEvidence(page, error, contextName, consoleEvents, pageErrors, extra = {}) {
   if (!page || page.isClosed()) return;
   const timestamp = new Date().toISOString().replaceAll(':', '-');
   const prefix = path.join(artifactDir, `failure-${contextName}-${timestamp}`);
   await page.screenshot({ path: `${prefix}.png`, fullPage: true, timeout: 10_000 }).catch(() => {});
-  let bridgeMessages = [];
+  let pageState = {};
   try {
-    bridgeMessages = await page.evaluate(() => window.__simurghBridgeMessages ?? []);
+    pageState = await page.evaluate(() => {
+      const visible = element => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const text = element => (element.innerText || element.getAttribute('aria-label') || element.getAttribute('title') || '')
+        .replace(/\s+/g, ' ').trim().slice(0, 180);
+      const fingerprint = value => {
+        const source = JSON.stringify(value);
+        let hash = 2166136261;
+        for (let index = 0; index < source.length; index += 1) {
+          hash ^= source.charCodeAt(index);
+          hash = Math.imul(hash, 16777619);
+        }
+        return (hash >>> 0).toString(16);
+      };
+      return {
+        dialogs: [...document.querySelectorAll('[role="dialog"]')].filter(visible).map(text),
+        menus: [...document.querySelectorAll('[role="menu"]')].filter(visible).map(text),
+        menuItems: [...document.querySelectorAll('[role="menuitem"]')].filter(visible).map(text),
+        buttons: [...document.querySelectorAll('button')].filter(visible).map(text).filter(Boolean).slice(-40),
+        bridgeMessages: (window.__simurghBridgeMessages ?? []).map(message => ({
+          kind: message.kind,
+          sessionId: message.sessionId,
+          requestSeq: message.requestSeq,
+          captureId: message.capture?.captureId,
+          selectionMethod: message.capture?.selectionMethod,
+          range: message.capture?.range,
+          series: message.capture?.series?.map(series => ({
+            id: series.id,
+            refId: series.refId,
+            name: series.name,
+            labels: series.labels,
+            pointCount: series.points?.length ?? 0,
+            pointHash: fingerprint(series.points ?? []),
+          })),
+          freehandBinding: message.freehandBinding && {
+            id: message.freehandBinding.id,
+            plotRect: message.freehandBinding.plotRect,
+            grafanaVersion: message.freehandBinding.grafanaVersion,
+            uPlotVersion: message.freehandBinding.uPlotVersion,
+          },
+          error: message.error,
+        })),
+        canvases: [...document.querySelectorAll('canvas')].filter(visible).map(canvas => ({
+          width: canvas.width,
+          height: canvas.height,
+          cssWidth: Math.round(canvas.getBoundingClientRect().width),
+          cssHeight: Math.round(canvas.getBoundingClientRect().height),
+          fingerprint: fingerprint(canvas.toDataURL().slice(0, 4096)),
+        })),
+      };
+    });
   } catch {}
+  const queryFrames = await summarizeQueryFrames(extra.queries ?? []);
   const diagnostics = {
     context: contextName,
     url: page.url(),
@@ -225,9 +309,44 @@ async function saveFailureEvidence(page, error, contextName, consoleEvents, page
     error: { name: error?.name, message: error?.message, stack: error?.stack },
     consoleEvents,
     pageErrors,
-    bridgeMessages,
+    pageState,
+    queryFrames,
+    ...extra.details,
   };
   await writeFile(`${prefix}.json`, JSON.stringify(diagnostics, null, 2));
+}
+
+async function summarizeQueryFrames(responses) {
+  const result = [];
+  for (const response of responses.slice(-6)) {
+    let body;
+    try {
+      body = await response.body;
+    } catch (error) {
+      result.push({ status: response.status, requestRange: response.requestRange, responseError: error.message });
+      continue;
+    }
+    const frames = queryFrames(body).map(frame => {
+      const fields = frame.schema?.fields ?? [];
+      const columns = frame.data?.values ?? [];
+      return {
+        refId: frame.refId,
+        fields: fields.map((field, index) => {
+          const values = columns[index] ?? [];
+          return {
+            name: field.name,
+            type: field.type,
+            labels: field.labels,
+            length: values.length,
+            nullCount: values.filter(value => value === null || value === undefined).length,
+            valueHash: createHash('sha256').update(JSON.stringify(values)).digest('hex').slice(0, 16),
+          };
+        }),
+      };
+    });
+    result.push({ status: response.status, requestRange: response.requestRange, frames });
+  }
+  return result;
 }
 
 async function selectNativeRange(page, initialRange, latestSampleTime) {
@@ -278,10 +397,328 @@ async function selectNativeRange(page, initialRange, latestSampleTime) {
 
 async function openInspector(page) {
   const action = await openSimurghMenuAction(page);
-  await action.click();
+  await activateSimurghMenuAction(page, action, 'Inspect with Simurgh');
   const inspector = page.locator('section[data-testid="simurgh-inspector"]');
   await inspector.waitFor({ state: 'visible', timeout: 15_000 });
   return inspector;
+}
+
+async function openFreehandInspector(page) {
+  const action = await openSimurghMenuAction(page, 'Freehand with Simurgh');
+  await activateSimurghMenuAction(page, action, 'Freehand with Simurgh');
+  const inspector = page.locator('section[data-testid="simurgh-inspector"]');
+  try {
+    await inspector.waitFor({ state: 'visible', timeout: 15_000 });
+  } catch {
+    const dialogs = await page.getByRole('dialog').allTextContents();
+    const bridge = await page.evaluate(() => (window.__simurghBridgeMessages ?? []).map(message => ({
+      kind: message.kind,
+      sessionId: message.sessionId,
+      requestSeq: message.requestSeq,
+      captureId: message.capture?.captureId,
+      selectionMethod: message.capture?.selectionMethod,
+      seriesCount: message.capture?.series?.length,
+      series: message.capture?.series?.map(series => ({
+        id: series.id, refId: series.refId, name: series.name, labels: series.labels, pointCount: series.points?.length ?? 0,
+      })),
+      freehandBinding: message.freehandBinding && {
+        id: message.freehandBinding.id,
+        plotRect: message.freehandBinding.plotRect,
+        grafanaVersion: message.freehandBinding.grafanaVersion,
+        uPlotVersion: message.freehandBinding.uPlotVersion,
+      },
+      error: message.error,
+    })));
+    throw new Error(`Freehand action did not open the inspector. dialogs=${JSON.stringify(dialogs)} bridge=${JSON.stringify(bridge)}`);
+  }
+  return inspector;
+}
+
+async function activateSimurghMenuAction(page, action, actionTitle) {
+  assert.equal(await action.isVisible(), true, `Grafana menu action "${actionTitle}" is not visible before activation`);
+  assert.equal(await action.isEnabled(), true, `Grafana menu action "${actionTitle}" is disabled`);
+  const focusedAction = await action.evaluate((element) => ({
+    active: document.activeElement === element,
+    role: element.getAttribute('role'),
+    name: element.innerText.trim(),
+    visible: element.getBoundingClientRect().width > 0 && element.getBoundingClientRect().height > 0,
+  }));
+  assert.deepEqual(focusedAction, {
+    active: true,
+    role: 'menuitem',
+    name: actionTitle,
+    visible: true,
+  }, `Grafana did not focus the intended visible menu action: ${JSON.stringify(focusedAction)}`);
+  await page.evaluate(() => {
+    window.__simurghMenuActivation = null;
+    window.__simurghMenuClickListener = event => {
+      const item = event.target.closest?.('[role="menuitem"]');
+      if (item) window.__simurghMenuActivation = {
+        name: item.innerText.trim(),
+        role: item.getAttribute('role'),
+        active: document.activeElement === item,
+      };
+    };
+    document.addEventListener('click', window.__simurghMenuClickListener, true);
+  });
+  await page.keyboard.press('Enter');
+  const activation = await page.evaluate(() => {
+    document.removeEventListener('click', window.__simurghMenuClickListener, true);
+    return window.__simurghMenuActivation;
+  });
+  assert.deepEqual(activation, { name: actionTitle, role: 'menuitem', active: true },
+    `Enter activated a different Grafana menu item: ${JSON.stringify(activation)}`);
+}
+
+async function verifyFreehandGesture() {
+  const profileDir = await mkdtemp(path.join(os.tmpdir(), 'simurgh-freehand-'));
+  let browser;
+  let page;
+  const queries = [];
+  const consoleErrors = [];
+  const consoleEvents = [];
+  const pageErrors = [];
+  try {
+    browser = await chromium.launchPersistentContext(profileDir, {
+      ...browserLaunchOptions(),
+      timezoneId: 'UTC',
+      viewport: { width: 1440, height: 1000 },
+      args: [`--disable-extensions-except=${extensionDir}`, `--load-extension=${extensionDir}`],
+    });
+  } catch (error) {
+    await rm(profileDir, { recursive: true, force: true });
+    throw error;
+  }
+  try {
+    page = await browser.newPage();
+    page.on('console', message => {
+      consoleEvents.push({ type: message.type(), text: message.text(), location: message.location() });
+      if (message.type() === 'error' && !(message.location().url.includes('/api/user/stars') && /401/.test(message.text()))) consoleErrors.push(message.text());
+    });
+    page.on('pageerror', error => {
+      pageErrors.push(error.message);
+      consoleErrors.push(error.message);
+    });
+    page.on('response', response => {
+      if (response.url().includes('/api/ds/query') && response.request().method() === 'POST') {
+        let requestRange;
+        try {
+          const body = response.request().postDataJSON();
+          requestRange = { from: body.from, to: body.to };
+        } catch { requestRange = undefined; }
+        queries.push({ status: response.status(), requestRange, body: response.json().catch(error => ({ responseError: error.message })) });
+      }
+    });
+    await page.addInitScript(() => {
+      window.__simurghBridgeMessages = [];
+      window.addEventListener('message', event => {
+        if (event.source === window && event.origin === location.origin && event.data?.channel === 'simurgh.context') {
+          window.__simurghBridgeMessages.push(event.data);
+        }
+      });
+    });
+    await page.goto(dashboardUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+    await page.getByText(panelTitle, { exact: true }).waitFor({ state: 'visible', timeout: 60_000 });
+    await waitUntil(() => queries.length > 0, 'Grafana did not issue a real datasource request for freehand capture');
+    await disableDashboardRefresh(page);
+    const warmData = await waitForRecentSamples(page, queries);
+    let actual = (await latestNumericResponse(queries)).series;
+    let inspector;
+    let relativeRangeOutcome = 'native binding opened without a prior range change';
+    const initialAction = await openSimurghMenuAction(page, 'Freehand with Simurgh');
+    await activateSimurghMenuAction(page, initialAction, 'Freehand with Simurgh');
+    inspector = page.locator('section[data-testid="simurgh-inspector"]');
+    try {
+      await inspector.waitFor({ state: 'visible', timeout: 6_000 });
+    } catch {
+      const dialogs = await page.getByRole('dialog').allTextContents();
+      relativeRangeOutcome = dialogs.join(' ').replace(/\s+/g, ' ').trim();
+      assert.match(relativeRangeOutcome, /absolute bounds|request.*range/i,
+        `Initial freehand attempt failed for an unexpected reason: ${relativeRangeOutcome}`);
+      await page.getByRole('button', { name: 'Close', exact: true }).last().click();
+      const queryIndex = queries.length;
+      await selectNativeRange(page, warmData.range, warmData.latestSampleTime);
+      await waitForNumericResponse(queries, queryIndex);
+      actual = (await latestNumericResponse(queries)).series;
+      inspector = await openFreehandInspector(page);
+    }
+    const initialMessage = await page.evaluate(() => window.__simurghBridgeMessages.filter(message =>
+      message.kind === 'capture' && message.freehandBinding).at(-1));
+    assert.ok(initialMessage?.freehandBinding, 'Normal Grafana startup did not provide a preloaded native renderer binding');
+    assert.equal(initialMessage.freehandBinding.grafanaVersion, '13.2.3');
+    assert.equal(initialMessage.freehandBinding.uPlotVersion, '1.6.32');
+    let plotRect = initialMessage.freehandBinding.plotRect;
+    assert.ok(plotRect.width > 300 && plotRect.height > 120, `Native interaction rectangle is implausibly small: ${JSON.stringify(plotRect)}`);
+    await inspector.getByTestId('begin-freehand').click();
+    const surface = page.getByTestId('freehand-surface');
+    await surface.waitFor({ state: 'visible' });
+
+    const emptyPath = [
+      { x: plotRect.left + 8, y: plotRect.top + 8 }, { x: plotRect.left + 28, y: plotRect.top + 8 },
+      { x: plotRect.left + 28, y: plotRect.top + 28 }, { x: plotRect.left + 8, y: plotRect.top + 28 },
+      { x: plotRect.left + 8, y: plotRect.top + 8 },
+    ];
+    await page.mouse.move(emptyPath[0].x, emptyPath[0].y);
+    await page.mouse.down();
+    for (const point of emptyPath.slice(1)) await page.mouse.move(point.x, point.y, { steps: 1 });
+    await page.mouse.up();
+    await inspector.getByRole('alert').filter({ hasText: /did not enclose any available native data samples/i }).waitFor({ state: 'visible', timeout: 10_000 });
+    assert.equal(await inspector.getByTestId('begin-freehand').count(), 0,
+      'A terminal freehand error left a consumed binding available for retry');
+    await inspector.getByRole('button', { name: 'Close inspector' }).click();
+    const freehandCaptureCount = await page.evaluate(() => window.__simurghBridgeMessages.filter(message =>
+      message.kind === 'capture' && message.capture?.selectionMethod === 'grafana-freehand').length);
+    await page.evaluate((message) => window.postMessage(message, window.location.origin), initialMessage);
+    const replayGesture = {
+      channel: 'simurgh.context', version: 1, integrationId: 'simurgh-context-app', kind: 'freehand-submit',
+      sessionId: initialMessage.sessionId, requestSeq: initialMessage.requestSeq, captureId: initialMessage.capture.captureId,
+      bindingId: initialMessage.freehandBinding.id, vertices: [{ x: 8, y: 8 }, { x: 28, y: 8 }, { x: 28, y: 28 }, { x: 8, y: 28 }],
+    };
+    await page.evaluate((gesture) => window.postMessage(gesture, window.location.origin), replayGesture);
+    await page.waitForTimeout(250);
+    assert.equal(await page.evaluate(() => window.__simurghBridgeMessages.filter(message =>
+      message.kind === 'capture' && message.capture?.selectionMethod === 'grafana-freehand').length), freehandCaptureCount,
+    'A closed inspector reopened or accepted a replayed freehand request');
+    inspector = await openFreehandInspector(page);
+    const reboundMessage = await page.evaluate(() => window.__simurghBridgeMessages.filter(message =>
+      message.kind === 'capture' && message.freehandBinding).at(-1));
+    assert.ok(reboundMessage?.freehandBinding, 'An empty-selection error did not permit a fresh binding after reopening');
+    plotRect = reboundMessage.freehandBinding.plotRect;
+    await inspector.getByTestId('begin-freehand').click();
+    await page.getByTestId('freehand-surface').waitFor({ state: 'visible' });
+    await page.setViewportSize({ width: 1320, height: 920 });
+    await inspector.getByRole('alert').filter({ hasText: /chart layout changed during the gesture/i }).waitFor({ state: 'visible', timeout: 10_000 });
+    assert.equal(await inspector.getByTestId('begin-freehand').count(), 0,
+      'A resize during drawing left a stale renderer binding available');
+    await inspector.getByRole('button', { name: 'Close inspector' }).click();
+    inspector = await openFreehandInspector(page);
+    const resizedMessage = await page.evaluate(() => window.__simurghBridgeMessages.filter(message =>
+      message.kind === 'capture' && message.freehandBinding).at(-1));
+    assert.ok(resizedMessage?.freehandBinding, 'The resized native renderer could not bind again after reopening');
+    plotRect = resizedMessage.freehandBinding.plotRect;
+    await inspector.getByTestId('begin-freehand').click();
+    const initialSurface = page.getByTestId('freehand-surface');
+    await initialSurface.waitFor({ state: 'visible' });
+    const initialSurfaceBox = await initialSurface.boundingBox();
+    assert.ok(initialSurfaceBox && Math.abs(initialSurfaceBox.width - plotRect.width) <= 2 && Math.abs(initialSurfaceBox.height - plotRect.height) <= 2,
+      `Active freehand surface differs from its bound native plot rectangle: ${JSON.stringify({ initialSurfaceBox, plotRect })}`);
+
+    const prepareCurrentGesture = async (bindingMessage) => {
+      const response = await latestNumericResponse(queries);
+      assert.ok(response, 'The current Grafana chart has no datasource samples for freehand geometry');
+      actual = response.series;
+      const range = { from: epoch(response.requestRange?.from), to: epoch(response.requestRange?.to) };
+      assert.deepEqual(range, bindingMessage.capture.range,
+        'Samples used to place the freehand path do not match the currently bound request range');
+      const capturedSeries = bindingMessage.capture.series;
+      const candidates = actual.filter((item) => capturedSeries.some((candidate) =>
+        JSON.stringify(item.labels, Object.keys(item.labels).sort()) ===
+        JSON.stringify(candidate.labels, Object.keys(candidate.labels).sort())));
+      const path = freehandPathAroundSamples(candidates, range, bindingMessage.freehandBinding.plotRect);
+      for (const target of path.targets) {
+        const source = candidates.find((item) =>
+          JSON.stringify(item.labels, Object.keys(item.labels).sort()) === JSON.stringify(target.labels, Object.keys(target.labels).sort()));
+        assert.ok(source?.points.some((point) => point.time === target.time && point.value === target.value),
+          `Freehand target is not an exact current datasource sample: ${JSON.stringify(target)}`);
+        assert.ok(pointInPolygon(target, path.vertices), 'Expected datasource sample lies outside the drawn freehand path');
+      }
+      return path;
+    };
+    const initialGesture = await prepareCurrentGesture(resizedMessage);
+    const drawGesture = async (box, vertices) => {
+      const path = vertices.map((point) => ({ x: box.x + point.x, y: box.y + point.y }));
+      await page.mouse.move(path[0].x, path[0].y);
+      await page.mouse.down();
+      for (const point of path.slice(1)) await page.mouse.move(point.x, point.y, { steps: 1 });
+      await page.mouse.up();
+    };
+    const stalePath = initialGesture.vertices.map((point) => ({ x: initialSurfaceBox.x + point.x, y: initialSurfaceBox.y + point.y }));
+    const refreshIndex = queries.length;
+    await page.mouse.move(stalePath[0].x, stalePath[0].y);
+    await page.mouse.down();
+    await page.getByRole('button', { name: 'Refresh', exact: true }).evaluate((button) => button.click());
+    await waitForNumericResponse(queries, refreshIndex);
+    for (const point of stalePath.slice(1)) await page.mouse.move(point.x, point.y, { steps: 1 });
+    await page.mouse.up();
+    await inspector.getByText(/chart data, visibility, scale, or layout changed during the gesture/i).waitFor({ state: 'visible', timeout: 10_000 });
+    assert.equal(await inspector.getByTestId('begin-freehand').count(), 0,
+      'A stale renderer binding remained available for another gesture');
+    await inspector.getByRole('button', { name: 'Close inspector' }).click();
+    inspector = await openFreehandInspector(page);
+    const refreshedMessage = await page.evaluate(() => window.__simurghBridgeMessages.filter(message =>
+      message.kind === 'capture' && message.freehandBinding).at(-1));
+    assert.ok(refreshedMessage?.freehandBinding, 'A refreshed native renderer could not bind to its current panel data');
+    plotRect = refreshedMessage.freehandBinding.plotRect;
+    const gesture = await prepareCurrentGesture(refreshedMessage);
+    await inspector.getByTestId('begin-freehand').click();
+    const refreshedSurface = page.getByTestId('freehand-surface');
+    await refreshedSurface.waitFor({ state: 'visible' });
+    const refreshedSurfaceBox = await refreshedSurface.boundingBox();
+    assert.ok(refreshedSurfaceBox && Math.abs(refreshedSurfaceBox.width - plotRect.width) <= 2 && Math.abs(refreshedSurfaceBox.height - plotRect.height) <= 2,
+      `Refreshed freehand surface differs from its bound native plot rectangle: ${JSON.stringify({ refreshedSurfaceBox, plotRect })}`);
+    await drawGesture(refreshedSurfaceBox, gesture.vertices);
+
+    await waitUntil(async () => page.evaluate(() => window.__simurghBridgeMessages.some(message =>
+      message.kind === 'capture' && message.capture?.selectionMethod === 'grafana-freehand') ||
+      [...(document.querySelector('[data-testid="simurgh-overlay-host"]')?.shadowRoot?.querySelectorAll('[role="alert"]') ?? [])]
+        .some(alert => !/checking the native chart samples/i.test(alert.textContent ?? ''))),
+    'Native renderer did not return a freehand result or visible rejection', 20_000);
+    const error = await inspector.locator('[role="alert"]').allTextContents();
+    const resultMessage = await page.evaluate(() => window.__simurghBridgeMessages.filter(message =>
+      message.kind === 'capture' && message.capture?.selectionMethod === 'grafana-freehand').at(-1));
+    const submittedGesture = await page.evaluate(() => window.__simurghBridgeMessages.filter(message => message.kind === 'freehand-submit').at(-1));
+    assert.ok(resultMessage, `Native freehand was rejected: ${error.join(' | ')}; submit=${JSON.stringify(submittedGesture)}`);
+    const snapshot = resultMessage.capture;
+    assert.ok(snapshot.freehand.vertices.length >= 3, 'Confirmed geometry did not retain the actual freehand path');
+    assert.ok(snapshot.freehand.candidates.length >= Math.min(gesture.targets.length, 2),
+      'The sample-centered freehand path did not preserve its enclosed explicit series candidates');
+    assert.equal(snapshot.freehand.candidates.length, await inspector.locator('[data-testid^="series-option-"]').count());
+    assert.ok(snapshot.freehand.interval.from >= snapshot.range.from && snapshot.freehand.interval.to <= snapshot.range.to);
+
+    const radio = inspector.locator('[data-testid^="series-option-"] input[type="radio"]').first();
+    const selectedId = await radio.inputValue();
+    await radio.check();
+    await inspector.getByTestId('confirm-capture').click();
+    const bundle = await openConfirmedBundle(inspector);
+    const confirmed = JSON.parse((await bundle.textContent()).trim());
+    assert.equal(confirmed.selectionMethod, 'grafana-freehand');
+    assert.equal(confirmed.selected.id, selectedId);
+    assert.deepEqual(confirmed.confirmation.range, snapshot.freehand.interval);
+    assert.deepEqual(confirmed.freehand.confirmedPointIndexes.length, confirmed.selected.points.length);
+    const source = actual.find(item => JSON.stringify(item.labels, Object.keys(item.labels).sort()) ===
+      JSON.stringify(confirmed.selected.labels, Object.keys(confirmed.selected.labels).sort()));
+    assert.ok(source, 'Chosen freehand series labels do not match any actual Grafana datasource frame');
+    for (const point of confirmed.selected.points) {
+      assert.ok(source.points.some(sample => sample.time === point.time && sample.value === point.value),
+        `Freehand confirmation contains a point absent from actual /api/ds/query data: ${JSON.stringify(point)}`);
+    }
+    assert.equal(confirmed.freehand.confirmedSeriesId, confirmed.selected.id);
+    const refreshAfterConfirm = queries.length;
+    await page.getByRole('button', { name: 'Refresh', exact: true }).evaluate((button) => button.click());
+    await waitForNumericResponse(queries, refreshAfterConfirm);
+    assert.deepEqual(JSON.parse((await bundle.textContent()).trim()), confirmed,
+      'A post-confirmation Grafana refresh changed the immutable freehand bundle');
+    const freehandArtifact = path.join(artifactDir, 'freehand-confirmed-capture.json');
+    await writeFile(freehandArtifact, JSON.stringify(confirmed, null, 2));
+    await page.screenshot({ path: path.join(artifactDir, 'freehand-desktop.png'), fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.waitForTimeout(350);
+    const narrowInspector = await page.locator('section[data-testid="simurgh-inspector"]').boundingBox();
+    assert.ok(narrowInspector && narrowInspector.x >= 0 && narrowInspector.x + narrowInspector.width <= 390,
+      `Inspector overflows narrow viewport: ${JSON.stringify(narrowInspector)}`);
+    await page.screenshot({ path: path.join(artifactDir, 'freehand-narrow.png'), fullPage: true });
+    assert.deepEqual(consoleErrors, [], `Freehand browser flow emitted errors: ${consoleErrors.join('\n')}`);
+    return { candidateCount: snapshot.freehand.candidates.length, selectedId, selectedPoints: confirmed.selected.points.length,
+      selectedInterval: confirmed.confirmation.range, freehandArtifact, relativeRangeOutcome,
+      staleRefreshRejected: true, refreshedBindingAccepted: true, narrowViewportInspectorVisible: true,
+      confirmedBundleStableAfterRefresh: true };
+  } catch (error) {
+    await saveFailureEvidence(page, error, 'freehand', consoleEvents, pageErrors, { queries });
+    throw error;
+  } finally {
+    await browser.close();
+    await rm(profileDir, { recursive: true, force: true });
+  }
 }
 
 async function openConfirmedBundle(inspector) {
@@ -328,12 +765,12 @@ async function verifyMissingExtensionState() {
     assert.equal(epoch(zoomResponse.requestRange?.from), epoch(zoom.from), 'Missing-extension native request start is not absolute');
     assert.equal(epoch(zoomResponse.requestRange?.to), epoch(zoom.to), 'Missing-extension native request end is not absolute');
     const action = await openSimurghMenuAction(page);
-    await action.click();
+    await activateSimurghMenuAction(page, action, 'Inspect with Simurgh');
     const dialog = page.getByRole('dialog');
     await dialog.waitFor({ state: 'visible', timeout: 15_000 });
     const dialogText = await dialog.innerText();
     await page.getByText('Simurgh extension required', { exact: true }).waitFor({ state: 'visible' });
-    assert.match(dialogText, /install and enable.*Chromium extension/i, 'Missing-extension dialog does not tell the user what to do');
+    assert.match(dialogText, /install and enable.*browser extension/i, 'Missing-extension dialog does not tell the user what to do');
     return dialogText;
   } catch (error) {
     await saveFailureEvidence(page, error, 'missing-extension', consoleEvents, pageErrors);
@@ -383,9 +820,14 @@ async function main() {
 
   await waitForGrafana();
   await mkdir(artifactDir, { recursive: true });
+  if (process.env.SIMURGH_FREEHAND_ONLY === '1') {
+    console.log(JSON.stringify({ status: 'freehand-only', ...(await verifyFreehandGesture()) }, null, 2));
+    return;
+  }
   const profileDir = await mkdtemp(path.join(os.tmpdir(), 'simurgh-browser-'));
   let context;
   let page;
+  const grafanaQueries = [];
   const consoleEvents = [];
   const pageErrors = [];
   try {
@@ -399,7 +841,6 @@ async function main() {
       ],
     });
     page = await context.newPage();
-    const grafanaQueries = [];
     page.on('pageerror', error => {
       errors.push(error.message);
       pageErrors.push(error.message);
@@ -475,6 +916,9 @@ async function main() {
     const initialSnapshot = JSON.parse(initialBundleText);
     assert.equal(initialSnapshot.selected.id, chosenId, 'Confirmed snapshot selected a different series than the explicit radio choice');
     assertSnapshotAgainstGrafana(initialSnapshot, nativeSeries, zoom);
+    assert.ok(initialSnapshot.limitations.some((item) =>
+      /structured scoped values were unavailable/i.test(item) && /\bhost\b/.test(item)),
+    'Capture did not disclose that the referenced host template variable lacks structured values');
     const downloadPromise = page.waitForEvent('download');
     await inspector.getByRole('button', { name: 'Download JSON', exact: true }).click();
     const download = await downloadPromise;
@@ -483,6 +927,10 @@ async function main() {
     assert.ok(downloadPath, 'Confirmed JSON download did not produce a file');
     assert.deepEqual(JSON.parse(await readFile(downloadPath, 'utf8')), initialSnapshot,
       'Downloaded JSON differs from the exact confirmed snapshot');
+    const persistedCapturePath = path.join(artifactDir, 'confirmed-capture.json');
+    await writeFile(persistedCapturePath, await readFile(downloadPath));
+    assert.deepEqual(JSON.parse(await readFile(persistedCapturePath, 'utf8')), initialSnapshot,
+      'Persisted confirmed capture differs from the exact downloaded snapshot');
 
     await inspector.getByRole('button', { name: /correct selection/i }).click();
     await bundle.waitFor({ state: 'detached', timeout: 10_000 });
@@ -614,7 +1062,14 @@ async function main() {
       dashboardUrl: page.url(),
       missingExtensionState: 'actionable modal shown',
       missingExtensionMessage: missingExtensionState,
-      nativeZoom: zoom,
+      nativeZoom: {
+        from: zoom.from,
+        to: zoom.to,
+        targetStart: zoom.targetStart,
+        targetEnd: zoom.targetEnd,
+        startRatio: zoom.startRatio,
+        endRatio: zoom.endRatio,
+      },
       isolatedExtension,
       candidateCount: seriesCount,
       chosenSeries: chosenLabel,
@@ -625,6 +1080,7 @@ async function main() {
       correctedStart: correctedStart,
       confirmedSnapshotLength: confirmedText.length,
       downloadedFilename: download.suggestedFilename(),
+      persistedConfirmedCapture: persistedCapturePath,
       secondCaptureId: secondSnapshot.captureId,
       secondCaptureRequestSeq: secondBridgeCapture.requestSeq,
       retainedAcceptedBundles: retainedAfterSecondCapture.length,
@@ -633,12 +1089,15 @@ async function main() {
       expectedAnonymousViewerErrors: expectedConsoleErrors,
     }, null, 2));
   } catch (error) {
-    await saveFailureEvidence(page, error, 'extension', consoleEvents, pageErrors);
+    await saveFailureEvidence(page, error, 'extension', consoleEvents, pageErrors, { queries: grafanaQueries });
     throw error;
   } finally {
     await context?.close();
     await rm(profileDir, { recursive: true, force: true });
   }
+
+  const freehand = await verifyFreehandGesture();
+  console.log(JSON.stringify({ status: 'freehand-passed', ...freehand }, null, 2));
 }
 
 main().catch(error => {

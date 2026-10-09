@@ -2,8 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
+    branches: [main, dev]
   workflow_dispatch:
 
 permissions:
@@ -16,30 +17,66 @@ concurrency:
 jobs:
   checks:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
+      - name: Verify release artifact packager
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/release -v
       - run: npm ci
       - run: npm audit --audit-level=high --registry=https://registry.npmjs.org
       - run: npm test
       - run: npm run typecheck
       - run: npm run build
+      - name: Verify VS Code extension in isolated editor host
+        run: xvfb-run -a npm run test:editor
       - name: Start local Grafana lab
         run: docker compose -f infra/compose.yaml up -d --wait --wait-timeout 180
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
+      - name: Verify workspace client fixture
+        run: npm run test:workspace
       - name: Verify browser integration
         run: npm run test:browser
+      - name: Install pinned Firefox test runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx playwright install-deps firefox
+          runtime="$RUNNER_TEMP/simurgh-firefox"
+          mkdir -p "$runtime"
+          curl --fail --location --retry 3 https://archive.mozilla.org/pub/firefox/releases/157.0.1/linux-x86_64/en-US/firefox-157.0.1.tar.xz -o "$runtime/firefox.tar.xz"
+          curl --fail --location --retry 3 https://github.com/mozilla/geckodriver/releases/download/v0.37.1/geckodriver-v0.37.1-linux64.tar.gz -o "$runtime/geckodriver.tar.gz"
+          printf '0d92bf39cdd174f5f361008509310bdefbce72a57ca10523a43b32d62dc699b6  %s\n' "$runtime/firefox.tar.xz" | sha256sum --check -
+          printf 'e815130ea95983e162ae91843b48d3a3ce991735635fce83a647afde21e09f7e  %s\n' "$runtime/geckodriver.tar.gz" | sha256sum --check -
+          tar -xJf "$runtime/firefox.tar.xz" -C "$runtime"
+          tar -xzf "$runtime/geckodriver.tar.gz" -C "$runtime"
+          printf 'SIMURGH_FIREFOX_BIN=%s/firefox/firefox\nSIMURGH_GECKODRIVER=%s/geckodriver\n' "$runtime" "$runtime" >> "$GITHUB_ENV"
+      - name: Verify installed Firefox extension
+        run: npm run test:firefox
       - name: Upload browser evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: phase1-browser-evidence
           path: tests/browser/artifacts/
+          if-no-files-found: ignore
+      - name: Upload workspace fixture evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: workspace-fixture-evidence
+          path: test-results/workspace/
+          if-no-files-found: ignore
+      - name: Upload Firefox evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: firefox-browser-evidence
+          path: test-results/firefox/
           if-no-files-found: ignore
       - name: Stop local Grafana lab
         if: always()

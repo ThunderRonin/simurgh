@@ -1,6 +1,6 @@
 {
   "name": "simurgh",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "private": true,
   "license": "Apache-2.0",
   "engines": {
@@ -11,9 +11,17 @@
   ],
   "scripts": {
     "test": "vitest run",
+    "test:editor": "npm run test:host --workspace @simurgh/vscode-extension",
+    "test:workspace": "npm run test:workspace --workspace @simurgh/workspace",
+    "test:workspace:live": "npm run build --workspace @simurgh/workspace && node tests/workspace/live.mjs",
     "test:browser": "node tests/browser/run.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck --workspace @simurgh/shared && npm run typecheck --workspace @simurgh/grafana-plugin && npm run typecheck --workspace @simurgh/chromium-extension",
-    "build": "npm run build --workspace @simurgh/grafana-plugin && npm run build --workspace @simurgh/chromium-extension"
+    "test:firefox": "node tests/firefox/startup.mjs && node tests/firefox/run.mjs",
+    "build:firefox": "npm run build:firefox --workspace @simurgh/chromium-extension",
+    "setup": "npm run setup --workspace @simurgh/coordinator --",
+    "setup:voice": "node scripts/setup-voice.mjs",
+    "start": "npm run start --workspace @simurgh/coordinator",
+    "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck --workspace @simurgh/shared && npm run typecheck --workspace @simurgh/grafana-plugin && npm run typecheck --workspace @simurgh/chromium-extension && npm run typecheck --workspace @simurgh/vscode-extension && npm run typecheck --workspace @simurgh/workspace && npm run typecheck --workspace @simurgh/coordinator",
+    "build": "npm run build --workspace @simurgh/grafana-plugin && npm run build --workspace @simurgh/chromium-extension && npm run build:firefox && npm run build --workspace @simurgh/vscode-extension && npm run build --workspace @simurgh/workspace && npm run build --workspace @simurgh/coordinator"
   },
   "devDependencies": {
     "esbuild": "0.25.11",

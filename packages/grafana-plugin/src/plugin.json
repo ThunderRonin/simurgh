@@ -7,14 +7,19 @@
     "keywords": ["app", "context"],
     "description": "Capture inspectable context from supported Grafana time series panels.",
     "author": { "name": "Simurgh contributors" },
-    "version": "0.1.0",
+    "logos": {
+      "small": "img/simurgh-mark.svg",
+      "large": "img/simurgh-mark.svg"
+    },
+    "version": "0.0.1",
     "updated": "2026-10-09",
     "license": "Apache-2.0"
   },
   "dependencies": {
-    "grafanaDependency": ">=13.2.3 <13.3.0",
+    "grafanaDependency": "13.2.3",
     "plugins": []
   },
+  "preload": true,
   "extensions": {
     "addedLinks": [
       {

@@ -1,0 +1,19 @@
+{
+  "name": "@simurgh/coordinator",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "esbuild src/main.ts src/setup.ts --bundle --platform=node --format=esm --packages=external --outdir=dist",
+    "start": "node dist/main.js",
+    "setup": "node dist/setup.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "12.4.1",
+    "@simurgh/shared": "0.0.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "7.6.13"
+  }
+}

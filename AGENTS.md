@@ -12,3 +12,9 @@ Read [DESIGN.md](DESIGN.md) and [CONTEXT.md](CONTEXT.md) before changing product
 - Do not commit, push, merge, or close Beads issues without explicit authorization and completed verification. Never close an issue automatically as a session cleanup step.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for pull request expectations and [SECURITY.md](SECURITY.md) for vulnerability reporting.
+
+## Maintainer agent dispatch
+
+- Use Sol 6.1 (`gpt-6.1-sol`) for planning and independent review. For backend implementation, use Sol 6.1 with low reasoning; this replaces the earlier Terra assignment and Sol planning-only restriction.
+- Use the latest available Luna for client, mirror, and documentation work. The current exposed identifier is `gpt-6-luna`; do not invent a version that the host does not offer.
+- Replace older Sol model assignments with Sol 6.1. Use current Luna rather than older Luna versions when available. Never use `max`; use `xhigh` only when explicitly requested.
