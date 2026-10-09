@@ -11,7 +11,7 @@ export function StatusDialog({ onDismiss }: Props) {
   );
 }
 
-let statusMessage = 'Install and enable the matching Simurgh Chromium extension, then open this panel action again.';
+let statusMessage = 'Install and enable the Simurgh browser extension, then open this panel action again.';
 
 export function setStatusMessage(message: string) {
   statusMessage = message;

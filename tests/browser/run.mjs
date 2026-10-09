@@ -198,13 +198,13 @@ async function findPanelMenu(page) {
   throw new Error('Could not find the native Grafana panel menu button');
 }
 
-async function openSimurghMenuAction(page) {
+async function openSimurghMenuAction(page, actionTitle = 'Inspect with Simurgh') {
   const menu = await findPanelMenu(page);
   await menu.click();
   const extensions = page.getByRole('menuitem', { name: 'Extensions', exact: true });
   await extensions.waitFor({ state: 'visible', timeout: 10_000 });
   await extensions.click();
-  const action = page.getByRole('menuitem', { name: 'Inspect with Simurgh', exact: true });
+  const action = page.getByRole('menuitem', { name: actionTitle, exact: true });
   await action.waitFor({ state: 'visible', timeout: 10_000 });
   return action;
 }
@@ -284,6 +284,236 @@ async function openInspector(page) {
   return inspector;
 }
 
+async function openFreehandInspector(page) {
+  const action = await openSimurghMenuAction(page, 'Freehand with Simurgh');
+  await action.click();
+  const inspector = page.locator('section[data-testid="simurgh-inspector"]');
+  try {
+    await inspector.waitFor({ state: 'visible', timeout: 15_000 });
+  } catch {
+    const dialogs = await page.getByRole('dialog').allTextContents();
+    const status = await page.evaluate(() => [...document.querySelectorAll('[role="dialog"]')].map(item => item.textContent));
+    const bridge = await page.evaluate(() => window.__simurghBridgeMessages ?? []);
+    throw new Error(`Freehand action did not open the inspector. dialogs=${JSON.stringify(dialogs)} status=${JSON.stringify(status)} bridge=${JSON.stringify(bridge)}`);
+  }
+  return inspector;
+}
+
+async function verifyFreehandGesture() {
+  const profileDir = await mkdtemp(path.join(os.tmpdir(), 'simurgh-freehand-'));
+  let browser;
+  try {
+    browser = await chromium.launchPersistentContext(profileDir, {
+      ...browserLaunchOptions(),
+      timezoneId: 'UTC',
+      viewport: { width: 1440, height: 1000 },
+      args: [`--disable-extensions-except=${extensionDir}`, `--load-extension=${extensionDir}`],
+    });
+  } catch (error) {
+    await rm(profileDir, { recursive: true, force: true });
+    throw error;
+  }
+  let page;
+  try {
+    page = await browser.newPage();
+    const queries = [];
+    const consoleErrors = [];
+    page.on('console', message => {
+      if (message.type() === 'error' && !(message.location().url.includes('/api/user/stars') && /401/.test(message.text()))) consoleErrors.push(message.text());
+    });
+    page.on('pageerror', error => consoleErrors.push(error.message));
+    page.on('response', response => {
+      if (response.url().includes('/api/ds/query') && response.request().method() === 'POST') {
+        let requestRange;
+        try {
+          const body = response.request().postDataJSON();
+          requestRange = { from: body.from, to: body.to };
+        } catch { requestRange = undefined; }
+        queries.push({ status: response.status(), requestRange, body: response.json().catch(error => ({ responseError: error.message })) });
+      }
+    });
+    await page.addInitScript(() => {
+      window.__simurghBridgeMessages = [];
+      window.addEventListener('message', event => {
+        if (event.source === window && event.origin === location.origin && event.data?.channel === 'simurgh.context') {
+          window.__simurghBridgeMessages.push(event.data);
+        }
+      });
+    });
+    await page.goto(dashboardUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+    await page.getByText(panelTitle, { exact: true }).waitFor({ state: 'visible', timeout: 60_000 });
+    await waitUntil(() => queries.length > 0, 'Grafana did not issue a real datasource request for freehand capture');
+    await disableDashboardRefresh(page);
+    const warmData = await waitForRecentSamples(page, queries);
+    let actual = (await latestNumericResponse(queries)).series;
+    let inspector;
+    let relativeRangeOutcome = 'native binding opened without a prior range change';
+    const initialAction = await openSimurghMenuAction(page, 'Freehand with Simurgh');
+    await initialAction.click();
+    inspector = page.locator('section[data-testid="simurgh-inspector"]');
+    try {
+      await inspector.waitFor({ state: 'visible', timeout: 6_000 });
+    } catch {
+      const dialogs = await page.getByRole('dialog').allTextContents();
+      relativeRangeOutcome = dialogs.join(' ').replace(/\s+/g, ' ').trim();
+      assert.match(relativeRangeOutcome, /absolute bounds|request.*range/i,
+        `Initial freehand attempt failed for an unexpected reason: ${relativeRangeOutcome}`);
+      await page.getByRole('button', { name: 'Close', exact: true }).last().click();
+      const queryIndex = queries.length;
+      await selectNativeRange(page, warmData.range, warmData.latestSampleTime);
+      await waitForNumericResponse(queries, queryIndex);
+      actual = (await latestNumericResponse(queries)).series;
+      inspector = await openFreehandInspector(page);
+    }
+    const initialMessage = await page.evaluate(() => window.__simurghBridgeMessages.filter(message =>
+      message.kind === 'capture' && message.freehandBinding).at(-1));
+    assert.ok(initialMessage?.freehandBinding, 'Normal Grafana startup did not provide a preloaded native renderer binding');
+    assert.equal(initialMessage.freehandBinding.grafanaVersion, '13.2.3');
+    assert.equal(initialMessage.freehandBinding.uPlotVersion, '1.6.32');
+    let plotRect = initialMessage.freehandBinding.plotRect;
+    assert.ok(plotRect.width > 300 && plotRect.height > 120, `Native interaction rectangle is implausibly small: ${JSON.stringify(plotRect)}`);
+    await inspector.getByTestId('begin-freehand').click();
+    const surface = page.getByTestId('freehand-surface');
+    await surface.waitFor({ state: 'visible' });
+
+    const emptyPath = [
+      { x: plotRect.left + 8, y: plotRect.top + 8 }, { x: plotRect.left + 28, y: plotRect.top + 8 },
+      { x: plotRect.left + 28, y: plotRect.top + 28 }, { x: plotRect.left + 8, y: plotRect.top + 28 },
+      { x: plotRect.left + 8, y: plotRect.top + 8 },
+    ];
+    await page.mouse.move(emptyPath[0].x, emptyPath[0].y);
+    await page.mouse.down();
+    for (const point of emptyPath.slice(1)) await page.mouse.move(point.x, point.y, { steps: 1 });
+    await page.mouse.up();
+    await inspector.getByRole('alert').filter({ hasText: /did not enclose any available native data samples/i }).waitFor({ state: 'visible', timeout: 10_000 });
+    assert.equal(await inspector.getByTestId('begin-freehand').count(), 0,
+      'A terminal freehand error left a consumed binding available for retry');
+    await inspector.getByRole('button', { name: 'Close inspector' }).click();
+    const freehandCaptureCount = await page.evaluate(() => window.__simurghBridgeMessages.filter(message =>
+      message.kind === 'capture' && message.capture?.selectionMethod === 'grafana-freehand').length);
+    await page.evaluate((message) => window.postMessage(message, window.location.origin), initialMessage);
+    const replayGesture = {
+      channel: 'simurgh.context', version: 1, integrationId: 'simurgh-context-app', kind: 'freehand-submit',
+      sessionId: initialMessage.sessionId, requestSeq: initialMessage.requestSeq, captureId: initialMessage.capture.captureId,
+      bindingId: initialMessage.freehandBinding.id, vertices: [{ x: 8, y: 8 }, { x: 28, y: 8 }, { x: 28, y: 28 }, { x: 8, y: 28 }],
+    };
+    await page.evaluate((gesture) => window.postMessage(gesture, window.location.origin), replayGesture);
+    await page.waitForTimeout(250);
+    assert.equal(await page.evaluate(() => window.__simurghBridgeMessages.filter(message =>
+      message.kind === 'capture' && message.capture?.selectionMethod === 'grafana-freehand').length), freehandCaptureCount,
+    'A closed inspector reopened or accepted a replayed freehand request');
+    inspector = await openFreehandInspector(page);
+    const reboundMessage = await page.evaluate(() => window.__simurghBridgeMessages.filter(message =>
+      message.kind === 'capture' && message.freehandBinding).at(-1));
+    assert.ok(reboundMessage?.freehandBinding, 'An empty-selection error did not permit a fresh binding after reopening');
+    plotRect = reboundMessage.freehandBinding.plotRect;
+    await inspector.getByTestId('begin-freehand').click();
+    await page.getByTestId('freehand-surface').waitFor({ state: 'visible' });
+    await page.setViewportSize({ width: 1320, height: 920 });
+    await inspector.getByRole('alert').filter({ hasText: /chart layout changed during the gesture/i }).waitFor({ state: 'visible', timeout: 10_000 });
+    assert.equal(await inspector.getByTestId('begin-freehand').count(), 0,
+      'A resize during drawing left a stale renderer binding available');
+    await inspector.getByRole('button', { name: 'Close inspector' }).click();
+    inspector = await openFreehandInspector(page);
+    const resizedMessage = await page.evaluate(() => window.__simurghBridgeMessages.filter(message =>
+      message.kind === 'capture' && message.freehandBinding).at(-1));
+    assert.ok(resizedMessage?.freehandBinding, 'The resized native renderer could not bind again after reopening');
+    plotRect = resizedMessage.freehandBinding.plotRect;
+    await inspector.getByTestId('begin-freehand').click();
+    await page.getByTestId('freehand-surface').waitFor({ state: 'visible' });
+
+    const circlePoints = (rect) => Array.from({ length: 40 }, (_unused, index) => {
+        const angle = index / 39 * Math.PI * 2;
+        return { x: rect.left + rect.width * (0.5 + 0.46 * Math.cos(angle)),
+          y: rect.top + rect.height * (0.92 + 0.079 * Math.sin(angle)) };
+      });
+    const drawCircle = async (rect) => {
+      const circle = circlePoints(rect);
+      await page.mouse.move(circle[0].x, circle[0].y);
+      await page.mouse.down();
+      for (const point of circle.slice(1)) await page.mouse.move(point.x, point.y, { steps: 1 });
+      await page.mouse.up();
+    };
+    const staleCircle = circlePoints(plotRect);
+    const refreshIndex = queries.length;
+    await page.mouse.move(staleCircle[0].x, staleCircle[0].y);
+    await page.mouse.down();
+    await page.getByRole('button', { name: 'Refresh', exact: true }).evaluate((button) => button.click());
+    await waitForNumericResponse(queries, refreshIndex);
+    for (const point of staleCircle.slice(1)) await page.mouse.move(point.x, point.y, { steps: 1 });
+    await page.mouse.up();
+    await inspector.getByText(/chart data, visibility, scale, or layout changed during the gesture/i).waitFor({ state: 'visible', timeout: 10_000 });
+    assert.equal(await inspector.getByTestId('begin-freehand').count(), 0,
+      'A stale renderer binding remained available for another gesture');
+    await inspector.getByRole('button', { name: 'Close inspector' }).click();
+    inspector = await openFreehandInspector(page);
+    const refreshedMessage = await page.evaluate(() => window.__simurghBridgeMessages.filter(message =>
+      message.kind === 'capture' && message.freehandBinding).at(-1));
+    assert.ok(refreshedMessage?.freehandBinding, 'A refreshed native renderer could not bind to its current panel data');
+    plotRect = refreshedMessage.freehandBinding.plotRect;
+    await inspector.getByTestId('begin-freehand').click();
+    await page.getByTestId('freehand-surface').waitFor({ state: 'visible' });
+    await drawCircle(plotRect);
+
+    await waitUntil(async () => page.evaluate(() => window.__simurghBridgeMessages.some(message =>
+      message.kind === 'capture' && message.capture?.selectionMethod === 'grafana-freehand') ||
+      [...(document.querySelector('[data-testid="simurgh-overlay-host"]')?.shadowRoot?.querySelectorAll('[role="alert"]') ?? [])]
+        .some(alert => !/checking the native chart samples/i.test(alert.textContent ?? ''))),
+    'Native renderer did not return a freehand result or visible rejection', 20_000);
+    const error = await inspector.locator('[role="alert"]').allTextContents();
+    const resultMessage = await page.evaluate(() => window.__simurghBridgeMessages.filter(message =>
+      message.kind === 'capture' && message.capture?.selectionMethod === 'grafana-freehand').at(-1));
+    const submittedGesture = await page.evaluate(() => window.__simurghBridgeMessages.filter(message => message.kind === 'freehand-submit').at(-1));
+    assert.ok(resultMessage, `Native freehand was rejected: ${error.join(' | ')}; submit=${JSON.stringify(submittedGesture)}`);
+    const snapshot = resultMessage.capture;
+    assert.ok(snapshot.freehand.vertices.length >= 3, 'Confirmed geometry did not retain the actual freehand path');
+    assert.ok(snapshot.freehand.candidates.length > 1, 'The overlapping freehand gesture did not preserve multiple explicit series candidates');
+    assert.equal(snapshot.freehand.candidates.length, await inspector.locator('[data-testid^="series-option-"]').count());
+    assert.ok(snapshot.freehand.interval.from >= snapshot.range.from && snapshot.freehand.interval.to <= snapshot.range.to);
+
+    const radio = inspector.locator('[data-testid^="series-option-"] input[type="radio"]').first();
+    const selectedId = await radio.inputValue();
+    await radio.check();
+    await inspector.getByTestId('confirm-capture').click();
+    const bundle = await openConfirmedBundle(inspector);
+    const confirmed = JSON.parse((await bundle.textContent()).trim());
+    assert.equal(confirmed.selectionMethod, 'grafana-freehand');
+    assert.equal(confirmed.selected.id, selectedId);
+    assert.deepEqual(confirmed.confirmation.range, snapshot.freehand.interval);
+    assert.deepEqual(confirmed.freehand.confirmedPointIndexes.length, confirmed.selected.points.length);
+    const source = actual.find(item => JSON.stringify(item.labels, Object.keys(item.labels).sort()) ===
+      JSON.stringify(confirmed.selected.labels, Object.keys(confirmed.selected.labels).sort()));
+    assert.ok(source, 'Chosen freehand series labels do not match any actual Grafana datasource frame');
+    for (const point of confirmed.selected.points) {
+      assert.ok(source.points.some(sample => sample.time === point.time && sample.value === point.value),
+        `Freehand confirmation contains a point absent from actual /api/ds/query data: ${JSON.stringify(point)}`);
+    }
+    assert.equal(confirmed.freehand.confirmedSeriesId, confirmed.selected.id);
+    const refreshAfterConfirm = queries.length;
+    await page.getByRole('button', { name: 'Refresh', exact: true }).evaluate((button) => button.click());
+    await waitForNumericResponse(queries, refreshAfterConfirm);
+    assert.deepEqual(JSON.parse((await bundle.textContent()).trim()), confirmed,
+      'A post-confirmation Grafana refresh changed the immutable freehand bundle');
+    const freehandArtifact = path.join(artifactDir, 'freehand-confirmed-capture.json');
+    await writeFile(freehandArtifact, JSON.stringify(confirmed, null, 2));
+    await page.screenshot({ path: path.join(artifactDir, 'freehand-desktop.png'), fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.waitForTimeout(350);
+    const narrowInspector = await page.locator('section[data-testid="simurgh-inspector"]').boundingBox();
+    assert.ok(narrowInspector && narrowInspector.x >= 0 && narrowInspector.x + narrowInspector.width <= 390,
+      `Inspector overflows narrow viewport: ${JSON.stringify(narrowInspector)}`);
+    await page.screenshot({ path: path.join(artifactDir, 'freehand-narrow.png'), fullPage: true });
+    assert.deepEqual(consoleErrors, [], `Freehand browser flow emitted errors: ${consoleErrors.join('\n')}`);
+    return { candidateCount: snapshot.freehand.candidates.length, selectedId, selectedPoints: confirmed.selected.points.length,
+      selectedInterval: confirmed.confirmation.range, freehandArtifact, relativeRangeOutcome,
+      staleRefreshRejected: true, refreshedBindingAccepted: true, narrowViewportInspectorVisible: true,
+      confirmedBundleStableAfterRefresh: true };
+  } finally {
+    await browser.close();
+    await rm(profileDir, { recursive: true, force: true });
+  }
+}
+
 async function openConfirmedBundle(inspector) {
   const details = inspector.locator('details.json-inspect');
   await details.waitFor({ state: 'visible', timeout: 10_000 });
@@ -333,7 +563,7 @@ async function verifyMissingExtensionState() {
     await dialog.waitFor({ state: 'visible', timeout: 15_000 });
     const dialogText = await dialog.innerText();
     await page.getByText('Simurgh extension required', { exact: true }).waitFor({ state: 'visible' });
-    assert.match(dialogText, /install and enable.*Chromium extension/i, 'Missing-extension dialog does not tell the user what to do');
+    assert.match(dialogText, /install and enable.*browser extension/i, 'Missing-extension dialog does not tell the user what to do');
     return dialogText;
   } catch (error) {
     await saveFailureEvidence(page, error, 'missing-extension', consoleEvents, pageErrors);
@@ -383,6 +613,10 @@ async function main() {
 
   await waitForGrafana();
   await mkdir(artifactDir, { recursive: true });
+  if (process.env.SIMURGH_FREEHAND_ONLY === '1') {
+    console.log(JSON.stringify({ status: 'freehand-only', ...(await verifyFreehandGesture()) }, null, 2));
+    return;
+  }
   const profileDir = await mkdtemp(path.join(os.tmpdir(), 'simurgh-browser-'));
   let context;
   let page;
@@ -475,6 +709,9 @@ async function main() {
     const initialSnapshot = JSON.parse(initialBundleText);
     assert.equal(initialSnapshot.selected.id, chosenId, 'Confirmed snapshot selected a different series than the explicit radio choice');
     assertSnapshotAgainstGrafana(initialSnapshot, nativeSeries, zoom);
+    assert.ok(initialSnapshot.limitations.some((item) =>
+      /structured scoped values were unavailable/i.test(item) && /\bhost\b/.test(item)),
+    'Capture did not disclose that the referenced host template variable lacks structured values');
     const downloadPromise = page.waitForEvent('download');
     await inspector.getByRole('button', { name: 'Download JSON', exact: true }).click();
     const download = await downloadPromise;
@@ -483,6 +720,10 @@ async function main() {
     assert.ok(downloadPath, 'Confirmed JSON download did not produce a file');
     assert.deepEqual(JSON.parse(await readFile(downloadPath, 'utf8')), initialSnapshot,
       'Downloaded JSON differs from the exact confirmed snapshot');
+    const persistedCapturePath = path.join(artifactDir, 'confirmed-capture.json');
+    await writeFile(persistedCapturePath, await readFile(downloadPath));
+    assert.deepEqual(JSON.parse(await readFile(persistedCapturePath, 'utf8')), initialSnapshot,
+      'Persisted confirmed capture differs from the exact downloaded snapshot');
 
     await inspector.getByRole('button', { name: /correct selection/i }).click();
     await bundle.waitFor({ state: 'detached', timeout: 10_000 });
@@ -625,6 +866,7 @@ async function main() {
       correctedStart: correctedStart,
       confirmedSnapshotLength: confirmedText.length,
       downloadedFilename: download.suggestedFilename(),
+      persistedConfirmedCapture: persistedCapturePath,
       secondCaptureId: secondSnapshot.captureId,
       secondCaptureRequestSeq: secondBridgeCapture.requestSeq,
       retainedAcceptedBundles: retainedAfterSecondCapture.length,
@@ -639,6 +881,9 @@ async function main() {
     await context?.close();
     await rm(profileDir, { recursive: true, force: true });
   }
+
+  const freehand = await verifyFreehandGesture();
+  console.log(JSON.stringify({ status: 'freehand-passed', ...freehand }, null, 2));
 }
 
 main().catch(error => {

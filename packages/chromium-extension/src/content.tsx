@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   BRIDGE_CHANNEL,
@@ -10,6 +10,7 @@ import {
   type BridgeMessage,
   type CaptureSnapshot,
   type ConfirmedCapture,
+  type FreehandPlotBinding,
 } from '../../shared/src/index';
 
 const rootElement = document.createElement('div');
@@ -30,8 +31,11 @@ shadow.append(mount);
 
 const helloSessionId = crypto.randomUUID();
 const root = createRoot(mount);
+const STARTUP_RETRY_MS = 500;
+const STARTUP_MAX_HELLOS = 20;
+const STARTUP_ERROR = 'Grafana app plugin did not respond. Enable the Simurgh app plugin for this Grafana origin, then reload.';
 
-function post(kind: BridgeMessage['kind'], sessionId: string, requestSeq: number, capture?: CaptureSnapshot) {
+function post(kind: BridgeMessage['kind'], sessionId: string, requestSeq: number, capture?: CaptureSnapshot, details?: Pick<BridgeMessage, 'bindingId' | 'captureId'>) {
   const message: BridgeMessage = {
     channel: BRIDGE_CHANNEL,
     version: BRIDGE_VERSION,
@@ -40,6 +44,7 @@ function post(kind: BridgeMessage['kind'], sessionId: string, requestSeq: number
     sessionId,
     requestSeq,
     ...(capture ? { capture } : {}),
+    ...(details ?? {}),
   };
   window.postMessage(message, window.location.origin);
 }
@@ -55,62 +60,118 @@ function isPageMessage(event: MessageEvent<unknown>, sessionId: string, requestS
 }
 
 function ContentApp() {
+  const closedRequests = useRef<number[]>([]);
   const [pluginPresent, setPluginPresent] = useState(false);
+  const [startupDismissed, setStartupDismissed] = useState(false);
   const [capture, setCapture] = useState<CaptureSnapshot | null>(null);
+  const [freehandBinding, setFreehandBinding] = useState<FreehandPlotBinding | null>(null);
   const [confirmedHistory, setConfirmedHistory] = useState<ConfirmedCapture[]>([]);
   const [error, setError] = useState('');
+  const [activeSessionId, setActiveSessionId] = useState('');
+  const [activeRequestSeq, setActiveRequestSeq] = useState(-1);
 
   useEffect(() => {
     let pluginSeen = false;
-    let timeout = 0;
+    let startupTimer: number | undefined;
+    let helloAttempts = 0;
     let activeSessionId = '';
     let activeRequestSeq = -1;
+    const stopStartupTimer = () => {
+      if (startupTimer !== undefined) {
+        window.clearTimeout(startupTimer);
+        startupTimer = undefined;
+      }
+    };
+    const markPluginSeen = () => {
+      if (pluginSeen) return;
+      pluginSeen = true;
+      stopStartupTimer();
+      setPluginPresent(true);
+      setError('');
+    };
+    const sendHello = () => {
+      if (pluginSeen) return;
+      if (helloAttempts >= STARTUP_MAX_HELLOS) {
+        setError(STARTUP_ERROR);
+        startupTimer = undefined;
+        return;
+      }
+      helloAttempts += 1;
+      post('hello', helloSessionId, 0);
+      startupTimer = window.setTimeout(sendHello, STARTUP_RETRY_MS);
+    };
     const onMessage = (event: MessageEvent<unknown>) => {
       const data = event.data as Partial<BridgeMessage> | null;
       if (!data || event.source !== window || event.origin !== window.location.origin) return;
       if (data.kind === 'plugin-ready' && isPageMessage(event, helloSessionId, 0)) {
-        pluginSeen = true;
-        window.clearTimeout(timeout);
-        setPluginPresent(true);
-        setError('');
+        markPluginSeen();
         return;
       }
       if (data.kind === 'probe' && typeof data.sessionId === 'string' && Number.isSafeInteger(data.requestSeq) &&
         data.requestSeq! > activeRequestSeq && isPageMessage(event, data.sessionId, data.requestSeq!)) {
+        markPluginSeen();
         activeRequestSeq = data.requestSeq!;
         activeSessionId = data.sessionId;
+        setActiveSessionId(data.sessionId);
+        setActiveRequestSeq(data.requestSeq!);
+        setCapture(null);
+        setFreehandBinding(null);
         setError('');
         post('ready', data.sessionId, activeRequestSeq);
         return;
       }
       if (data.kind === 'capture' && typeof data.sessionId === 'string' && data.sessionId === activeSessionId &&
-        data.requestSeq === activeRequestSeq && isPageMessage(event, activeSessionId, activeRequestSeq)) {
+        data.requestSeq === activeRequestSeq && !closedRequests.current.includes(activeRequestSeq) &&
+        isPageMessage(event, activeSessionId, activeRequestSeq)) {
         const validated = validateCapture(data.capture);
         if (!validated.ok) {
           setError(validated.reason);
           return;
         }
         setCapture(validated.value);
+        setFreehandBinding(data.freehandBinding ?? null);
         setError('');
+        return;
+      }
+      if (data.kind === 'freehand-error' && data.sessionId === activeSessionId && data.requestSeq === activeRequestSeq &&
+        !closedRequests.current.includes(activeRequestSeq) && isPageMessage(event, activeSessionId, activeRequestSeq)) {
+        const message = typeof data.error === 'string' ? data.error : 'The freehand selection could not be matched to the native chart.';
+        setFreehandBinding(null);
+        setError(`${message} Close and reopen the inspector to bind the current chart.`);
       }
     };
     window.addEventListener('message', onMessage);
-    post('hello', helloSessionId, 0);
-    timeout = window.setTimeout(() => {
-      if (!pluginSeen) setError('Grafana app plugin unavailable on this origin.');
-    }, 900);
+    sendHello();
     return () => {
-      window.clearTimeout(timeout);
+      stopStartupTimer();
       window.removeEventListener('message', onMessage);
     };
   }, []);
 
   if (capture) {
-    return <Inspector key={capture.captureId} capture={capture} error={error} confirmedHistory={confirmedHistory}
-      onConfirmed={(item) => setConfirmedHistory((items) => [...items, item])} onClose={() => setCapture(null)} />;
+    const closeInspector = () => {
+      closedRequests.current = [...closedRequests.current.filter((seq) => seq !== activeRequestSeq), activeRequestSeq].slice(-20);
+      post('freehand-cancel', activeSessionId, activeRequestSeq, undefined,
+        { captureId: capture.captureId, ...(freehandBinding ? { bindingId: freehandBinding.id } : {}) });
+      setCapture(null);
+      setFreehandBinding(null);
+    };
+    return <Inspector key={capture.captureId} capture={capture} error={error} freehandBinding={freehandBinding}
+      sessionId={activeSessionId} requestSeq={activeRequestSeq} confirmedHistory={confirmedHistory}
+      onConfirmed={(item) => setConfirmedHistory((items) => [...items, item])}
+      onBindingInvalidated={() => {
+        if (freehandBinding) {
+          post('freehand-cancel', activeSessionId, activeRequestSeq, undefined,
+            { captureId: capture.captureId, bindingId: freehandBinding.id });
+        }
+        setFreehandBinding(null);
+      }} onClose={closeInspector} />;
   }
   if (error) {
-    return <StatusBanner message={error} onDismiss={() => setError('')} />;
+    return <StatusBanner message={error} onDismiss={() => { setError(''); setStartupDismissed(true); }} />;
+  }
+  if (!pluginPresent && !startupDismissed) {
+    return <StatusBanner message="Connecting to the Grafana app plugin…" onDismiss={() => setStartupDismissed(true)} />;
   }
   return null;
 }
@@ -125,26 +186,84 @@ function StatusBanner({ message, onDismiss }: { message: string; onDismiss: () =
   );
 }
 
-function Inspector({ capture, error: bridgeError, confirmedHistory, onConfirmed, onClose }: {
+function Inspector({ capture, error: bridgeError, freehandBinding, sessionId, requestSeq, confirmedHistory, onConfirmed, onBindingInvalidated, onClose }: {
   capture: CaptureSnapshot;
   error: string;
+  freehandBinding: FreehandPlotBinding | null;
+  sessionId: string;
+  requestSeq: number;
   confirmedHistory: ConfirmedCapture[];
   onConfirmed: (item: ConfirmedCapture) => void;
+  onBindingInvalidated: () => void;
   onClose: () => void;
 }) {
   const [seriesId, setSeriesId] = useState('');
-  const [startText, setStartText] = useState(() => localDate(capture.range.from));
-  const [endText, setEndText] = useState(() => localDate(capture.range.to));
+  const [startText, setStartText] = useState(() => localDate(capture.freehand?.interval.from ?? capture.range.from));
+  const [endText, setEndText] = useState(() => localDate(capture.freehand?.interval.to ?? capture.range.to));
   const [confirmed, setConfirmed] = useState<ConfirmedCapture | null>(null);
   const [error, setError] = useState('');
+  const [drawing, setDrawing] = useState(false);
+  const [vertices, setVertices] = useState<Array<{ x: number; y: number }>>([]);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
     setSeriesId('');
-    setStartText(localDate(capture.range.from));
-    setEndText(localDate(capture.range.to));
+    setStartText(localDate(capture.freehand?.interval.from ?? capture.range.from));
+    setEndText(localDate(capture.freehand?.interval.to ?? capture.range.to));
     setConfirmed(null);
     setError('');
   }, [capture.captureId]);
+
+  useEffect(() => {
+    if (!drawing || !freehandBinding) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ratio = window.devicePixelRatio || 1;
+    canvas.width = Math.round(freehandBinding.plotRect.width * ratio);
+    canvas.height = Math.round(freehandBinding.plotRect.height * ratio);
+    const context = canvas.getContext('2d');
+    if (!context) return;
+    context.scale(ratio, ratio);
+    context.clearRect(0, 0, freehandBinding.plotRect.width, freehandBinding.plotRect.height);
+    if (vertices.length > 0) {
+      context.beginPath();
+      context.moveTo(vertices[0].x, vertices[0].y);
+      for (const point of vertices.slice(1)) context.lineTo(point.x, point.y);
+      if (vertices.length >= 3) context.closePath();
+      context.strokeStyle = '#fff2a6';
+      context.lineWidth = 2;
+      context.stroke();
+      if (vertices.length >= 3) {
+        context.fillStyle = 'rgba(255, 242, 166, 0.18)';
+        context.fill();
+      }
+    }
+  }, [drawing, freehandBinding, vertices]);
+
+  useEffect(() => {
+    if (!drawing) return;
+    const cancelForLayoutChange = () => {
+      setDrawing(false);
+      setVertices([]);
+      onBindingInvalidated();
+      setError('The chart layout changed during the gesture. Close and reopen the inspector to bind the current chart.');
+    };
+    window.addEventListener('resize', cancelForLayoutChange);
+    window.addEventListener('scroll', cancelForLayoutChange, true);
+    return () => {
+      window.removeEventListener('resize', cancelForLayoutChange);
+      window.removeEventListener('scroll', cancelForLayoutChange, true);
+    };
+  }, [drawing, onBindingInvalidated]);
+
+  useEffect(() => {
+    if (!drawing) return;
+    const cancelOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') cancelDrawing();
+    };
+    window.addEventListener('keydown', cancelOnEscape);
+    return () => window.removeEventListener('keydown', cancelOnEscape);
+  }, [drawing]);
 
   const start = Date.parse(startText);
   const end = Date.parse(endText);
@@ -152,12 +271,59 @@ function Inspector({ capture, error: bridgeError, confirmedHistory, onConfirmed,
   const updateStart = (value: string) => { setStartText(value); setConfirmed(null); };
   const updateEnd = (value: string) => { setEndText(value); setConfirmed(null); };
   const updateSeries = (value: string) => { setSeriesId(value); setConfirmed(null); };
+  const beginDrawing = () => {
+    setError('');
+    setVertices([]);
+    setDrawing(true);
+  };
+  const addVertex = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!drawing || !freehandBinding || event.buttons !== 1) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const point = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    setVertices((current) => {
+      const previous = current[current.length - 1];
+      if (previous && Math.hypot(previous.x - point.x, previous.y - point.y) < 2.5) return current;
+      if (current.length >= 256) {
+        setDrawing(false);
+        setError('This freehand path exceeded the supported 256-point limit. Draw a simpler shape.');
+        return [];
+      }
+      return [...current, point];
+    });
+  };
+  const finishDrawing = () => {
+    if (!drawing || !freehandBinding) return;
+    setDrawing(false);
+    if (vertices.length < 3) {
+      setError('Draw a closed freehand shape around at least one chart sample.');
+      return;
+    }
+    window.postMessage({ channel: BRIDGE_CHANNEL, version: BRIDGE_VERSION, integrationId: INTEGRATION_ID,
+      kind: 'freehand-submit', sessionId, requestSeq, captureId: capture.captureId,
+      bindingId: freehandBinding.id, vertices }, window.location.origin);
+    setError('Checking the native chart samples...');
+  };
+  const cancelDrawing = () => {
+    setDrawing(false);
+    setVertices([]);
+    if (freehandBinding) {
+      post('freehand-cancel', sessionId, requestSeq, undefined,
+        { captureId: capture.captureId, bindingId: freehandBinding.id });
+      onBindingInvalidated();
+      setError('Freehand canceled. Refresh has been restored; close and reopen the inspector to draw again.');
+    } else {
+      setError('Freehand selection canceled.');
+    }
+  };
 
   const onConfirm = () => {
     try {
       const result = confirmCapture(capture, seriesId, { from: start, to: end });
       setConfirmed(result);
       onConfirmed(result);
+      if (capture.selectionMethod === 'grafana-freehand') {
+        post('freehand-complete', sessionId, requestSeq, undefined, { captureId: capture.captureId });
+      }
       setError('');
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'The selection could not be confirmed.');
@@ -175,8 +341,13 @@ function Inspector({ capture, error: bridgeError, confirmedHistory, onConfirmed,
     URL.revokeObjectURL(url);
   };
 
+  const visibleSeries = capture.freehand
+    ? capture.series.filter((series) => capture.freehand!.candidates.some((candidate) => candidate.seriesId === series.id))
+    : capture.series;
+
   return (
-    <section className="inspector" role="dialog" aria-modal="false" aria-labelledby="simurgh-title" data-testid="simurgh-inspector" style={{ pointerEvents: 'auto' }}>
+    <>
+    <section className="inspector" hidden={drawing} role="dialog" aria-modal="false" aria-labelledby="simurgh-title" data-testid="simurgh-inspector" style={{ pointerEvents: 'auto' }}>
       <header className="header">
         <div>
           <div className="eyebrow">GRAFANA CONTEXT</div>
@@ -217,11 +388,11 @@ function Inspector({ capture, error: bridgeError, confirmedHistory, onConfirmed,
 
           <fieldset className="candidate-list">
             <legend>Choose a numeric series</legend>
-            {capture.series.map((series) => (
+            {visibleSeries.map((series) => (
               <label className={`candidate ${seriesId === series.id ? 'active' : ''}`} key={series.id} data-testid={`series-option-${series.id}`}>
                 <input type="radio" name="series" value={series.id} checked={seriesId === series.id} onChange={() => updateSeries(series.id)} />
                 <span className="candidate-main"><strong>{series.name}</strong><small>{Object.entries(series.labels).map(([key, value]) => `${key}=${value}`).join(', ') || 'No labels'}</small></span>
-                <span className="sample-count">{series.points.length} pts</span>
+                  <span className="sample-count">{capture.freehand?.candidates.find((candidate) => candidate.seriesId === series.id)?.pointIndexes.length ?? series.points.length} pts</span>
               </label>
             ))}
           </fieldset>
@@ -230,6 +401,10 @@ function Inspector({ capture, error: bridgeError, confirmedHistory, onConfirmed,
             <label>Start time (local)<input aria-label="Start time" type="datetime-local" step="0.001" value={startText} onChange={(event) => updateStart(event.target.value)} /></label>
             <label>End time (local)<input aria-label="End time" type="datetime-local" step="0.001" value={endText} onChange={(event) => updateEnd(event.target.value)} /></label>
           </div>
+            {freehandBinding && !capture.freehand && <div className="draw-actions">
+              <button className="button secondary" type="button" data-testid="begin-freehand" onClick={beginDrawing}>Draw</button>
+              <small>Experimental renderer binding · Grafana {freehandBinding.grafanaVersion} · uPlot {freehandBinding.uPlotVersion}</small>
+            </div>}
           <p className="note">Confirmed timestamps are stored as absolute UTC values. A selection does not imply finer resolution than the captured samples.</p>
           {error && <p className="error" role="alert">{error}</p>}
           <details className="query-inspect">
@@ -238,7 +413,7 @@ function Inspector({ capture, error: bridgeError, confirmedHistory, onConfirmed,
           </details>
           <footer className="footer">
             <button className="button secondary" type="button" onClick={onClose}>Cancel</button>
-            <button className="button primary" type="button" data-testid="confirm-capture" disabled={!seriesId || !rangeIsValid} onClick={onConfirm}>Confirm target</button>
+            <button className="button primary" type="button" data-testid="confirm-capture" disabled={!seriesId || !rangeIsValid || Boolean(freehandBinding && !capture.freehand)} onClick={onConfirm}>Confirm target</button>
           </footer>
         </>
       )}
@@ -249,6 +424,20 @@ function Inspector({ capture, error: bridgeError, confirmedHistory, onConfirmed,
         </pre>)}
       </details>}
     </section>
+    {drawing && freehandBinding && <>
+      <canvas ref={canvasRef} data-testid="freehand-surface" aria-label="Draw a freehand polygon over the native Grafana chart"
+        onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); addVertex(event); }}
+        onPointerMove={addVertex}
+        onPointerUp={finishDrawing}
+        onPointerCancel={cancelDrawing}
+        style={{ position: 'fixed', zIndex: 2147483647, left: freehandBinding.plotRect.left, top: freehandBinding.plotRect.top,
+          width: freehandBinding.plotRect.width, height: freehandBinding.plotRect.height, touchAction: 'none', cursor: 'crosshair', pointerEvents: 'auto' }} />
+      <button className="draw-cancel" type="button" data-testid="cancel-freehand" onClick={cancelDrawing}
+        style={{ position: 'fixed', zIndex: 2147483647, left: freehandBinding.plotRect.left + 8, top: freehandBinding.plotRect.top + 8 }}>
+        Cancel
+      </button>
+    </>}
+    </>
   );
 }
 
@@ -289,6 +478,9 @@ function getStyles() {
 .time-edit label { display: grid; gap: 5px; color: #b6c9c3; font-size: 11px; }
 .time-edit input { width: 100%; min-width: 0; padding: 8px; color: #edf3f1; background: #0d1716; border: 1px solid #49615a; border-radius: 4px; font: 12px ui-monospace, monospace; }
 .note { color: #a8bbb5; font-size: 11px; margin: 5px 20px 12px; }
+.draw-actions { display: flex; align-items: center; gap: 8px; padding: 4px 20px 8px; flex-wrap: wrap; }
+.draw-actions small { color: #a8bbb5; font-size: 10px; }
+.draw-cancel { padding: 6px 9px; color: #f3f0e6; background: #2c2920; border: 1px solid #a78c50; border-radius: 4px; font: 600 11px ui-sans-serif, system-ui, sans-serif; cursor: pointer; }
 .query-inspect, .json-inspect { margin: 0 20px 14px; border-top: 1px solid #344542; padding-top: 10px; }
 summary { color: #8bd4af; cursor: pointer; font-size: 12px; }
 pre { overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; padding: 10px; margin: 8px 0 0; background: #0c1514; border-radius: 4px; color: #d6e5df; font: 10px/1.45 ui-monospace, monospace; }

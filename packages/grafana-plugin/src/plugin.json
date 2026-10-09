@@ -12,9 +12,10 @@
     "license": "Apache-2.0"
   },
   "dependencies": {
-    "grafanaDependency": ">=13.2.3 <13.3.0",
+    "grafanaDependency": "13.2.3",
     "plugins": []
   },
+  "preload": true,
   "extensions": {
     "addedLinks": [
       {
