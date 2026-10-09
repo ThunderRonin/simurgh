@@ -54,9 +54,11 @@ try {
   observe(page);
   await page.goto(baseUrl);
   await page.getByRole('heading', { name: 'Sign in' }).waitFor();
+  await assertDarkAppearance(page, '.login-page', '.login-form', '.login-form input');
   await page.getByLabel('Access token').fill('fixture-token');
   await page.getByRole('button', { name: 'Continue' }).click();
   await page.getByRole('heading', { name: 'References' }).waitFor();
+  await assertDarkAppearance(page, '.workspace-shell', '.references-column', '.question-form textarea');
   assert.equal(await page.evaluate(() => localStorage.length), 0, 'session token must not be persisted in localStorage');
   assert.equal(await page.locator('#local-token').count(), 0, 'token input must leave the DOM after login');
   assert.match(await page.locator('.voice-section').innerText(), /Voice input unavailable for this workspace/);
@@ -69,6 +71,7 @@ try {
   await page.getByTestId('investigation-result').waitFor();
   await page.getByRole('heading', { name: 'CPU utilization rose during the selected interval.' }).waitFor();
   await page.locator('.investigation-result .status-completed').waitFor();
+  await assertTextContrast(page, '.usage-note');
   assert.match(await page.getByTestId('investigation-result').innerText(), /Fixture data for client interaction tests only/);
   assert.equal(await page.getByRole('button', { name: /CPU utilization by core/ }).count(), 1, 'finding citation should resolve to its evidence');
   await page.getByTestId('play-finding-audio').click();
@@ -94,6 +97,8 @@ try {
   await page.getByRole('button', { name: 'Review sharing' }).click();
   const shareDialog = page.getByRole('dialog', { name: 'Review sharing' });
   await shareDialog.getByText('What changed in CPU utilization?').waitFor();
+  await assertDarkAppearance(page, '.dialog', '.share-preview', '.recipient-row');
+  await assertTextContrast(page, '.dialog-intro', '.share-preview > span:not(.section-kicker)');
   await shareDialog.getByRole('checkbox', { name: /Grace/ }).check();
   await shareDialog.getByRole('button', { name: 'Save access' }).click();
   await page.getByText('Shared with Grace').waitFor();
@@ -127,8 +132,14 @@ try {
   await assertNoOverflow(page, 390);
 
   await page.getByRole('button', { name: /Delete .*Lab host CPU utilization/ }).click();
-  await page.getByRole('dialog', { name: 'Delete reference?' }).getByRole('button', { name: 'Delete' }).click();
+  const deleteReferenceDialog = page.getByRole('dialog', { name: 'Delete reference?' });
+  const deleteReferenceButton = deleteReferenceDialog.getByRole('button', { name: 'Delete' });
+  await assertTextContrast(page, '.dialog-intro', '.dialog .button.danger');
+  await deleteReferenceButton.hover();
+  await assertTextContrast(page, '.dialog .button.danger');
+  await deleteReferenceButton.click();
   await page.getByText('No references saved').waitFor();
+  await assertTextContrast(page, '.references-column .empty-state strong');
   assert.equal(fixture.refs.length, 0);
   await page.getByRole('button', { name: 'Delete investigation' }).click();
   await page.getByRole('dialog', { name: 'Delete investigation?' }).getByRole('button', { name: 'Delete' }).click();
@@ -136,6 +147,7 @@ try {
   await page.getByRole('button', { name: 'Delete investigation' }).click();
   await page.getByRole('dialog', { name: 'Delete investigation?' }).getByRole('button', { name: 'Delete' }).click();
   await page.getByText('No investigations saved').waitFor();
+  await assertTextContrast(page, '.history-column .empty-state strong');
   assert.equal(fixture.investigations.length, 0);
 
   await page.getByRole('button', { name: 'Sign out' }).click();
@@ -308,6 +320,52 @@ async function assertNoOverflow(page, width) {
   assert.equal(result.viewport, width);
   assert.ok(result.document <= width + 1, `document overflow at ${width}px: ${JSON.stringify(result)}`);
   assert.deepEqual(result.offenders.filter((item) => item.scrollWidth > item.width + 2), [], `internal overflow: ${JSON.stringify(result)}`);
+}
+
+async function assertDarkAppearance(page, ...selectors) {
+  const appearance = await page.evaluate((surfaceSelectors) => ({
+    scheme: getComputedStyle(document.documentElement).colorScheme,
+    page: getComputedStyle(document.body).backgroundColor,
+    surfaces: surfaceSelectors.map((selector) => {
+      const element = document.querySelector(selector);
+      return { selector, background: element && getComputedStyle(element).backgroundColor };
+    }),
+  }), selectors);
+  assert.equal(appearance.scheme, 'dark', `workspace color scheme should default to dark: ${JSON.stringify(appearance)}`);
+  for (const surface of appearance.surfaces) {
+    assert.ok(surface.background, `expected rendered dark surface ${surface.selector}`);
+    const channels = surface.background.match(/\d+/g).slice(0, 3).map(Number);
+    assert.ok(Math.max(...channels) < 120, `${surface.selector} should render as a dark surface: ${surface.background}`);
+  }
+}
+
+async function assertTextContrast(page, ...selectors) {
+  const results = await page.evaluate((textSelectors) => {
+    const rgb = (value) => value.match(/[\d.]+/g).slice(0, 3).map(Number);
+    const luminance = (value) => value.map((channel) => {
+      const normalized = channel / 255;
+      return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+    }).reduce((total, channel, index) => total + channel * [0.2126, 0.7152, 0.0722][index], 0);
+    return textSelectors.map((selector) => {
+      const element = document.querySelector(selector);
+      if (!element) return { selector, missing: true };
+      const foreground = luminance(rgb(getComputedStyle(element).color));
+      let ancestor = element;
+      let background;
+      while (ancestor && !background) {
+        const value = getComputedStyle(ancestor).backgroundColor;
+        const alpha = value.match(/[\d.]+/g);
+        if (value !== 'rgba(0, 0, 0, 0)' && (!alpha || alpha.length < 4 || Number(alpha[3]) > 0)) background = luminance(rgb(value));
+        ancestor = ancestor.parentElement;
+      }
+      const [lighter, darker] = [foreground, background].sort((a, b) => b - a);
+      return { selector, ratio: (lighter + 0.05) / (darker + 0.05), text: getComputedStyle(element).color };
+    });
+  }, selectors);
+  for (const result of results) {
+    assert.ok(!result.missing, `expected text for contrast check: ${result.selector}`);
+    assert.ok(result.ratio >= 4.5, `${result.selector} contrast was ${result.ratio.toFixed(2)}:1 (${result.text})`);
+  }
 }
 
 function observe(page) {
