@@ -203,9 +203,12 @@ async function findPanelMenu(page) {
 async function openSimurghMenuAction(page, actionTitle = 'Inspect with Simurgh') {
   const menu = await findPanelMenu(page);
   await menu.click();
+  const panelMenu = page.getByRole('menu').last();
+  await panelMenu.waitFor({ state: 'visible', timeout: 10_000 });
+  await moveMenuFocusWithKeyboard(page, panelMenu, 'Extensions');
   const extensions = page.getByRole('menuitem', { name: 'Extensions', exact: true });
-  await extensions.waitFor({ state: 'visible', timeout: 10_000 });
-  await extensions.hover();
+  assert.equal(await extensions.getAttribute('aria-haspopup'), 'menu', 'Grafana Extensions entry is not a submenu');
+  await page.keyboard.press('ArrowRight');
   const action = page.getByRole('menuitem', { name: actionTitle, exact: true });
   try {
     await action.waitFor({ state: 'visible', timeout: 10_000 });
@@ -213,7 +216,27 @@ async function openSimurghMenuAction(page, actionTitle = 'Inspect with Simurgh')
     await saveFailureEvidence(page, error, `menu-${actionTitle.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}`, [], []);
     throw error;
   }
+  const submenu = page.getByRole('menu').last();
+  await moveMenuFocusWithKeyboard(page, submenu, actionTitle);
   return action;
+}
+
+async function moveMenuFocusWithKeyboard(page, menu, targetName) {
+  const itemCount = await menu.getByRole('menuitem').count();
+  assert.ok(itemCount > 0, `Grafana menu has no keyboard-navigable items while seeking "${targetName}"`);
+  for (let step = 0; step <= itemCount; step += 1) {
+    const active = await page.evaluate(() => {
+      const element = document.activeElement;
+      return element?.getAttribute('role') === 'menuitem' ? element.innerText.trim().replace(/\s+/g, ' ') : null;
+    });
+    if (active === targetName) return;
+    await page.keyboard.press('ArrowDown');
+  }
+  const active = await page.evaluate(() => ({
+    role: document.activeElement?.getAttribute('role'),
+    name: document.activeElement?.innerText?.trim().replace(/\s+/g, ' '),
+  }));
+  throw new Error(`Grafana keyboard navigation did not focus "${targetName}" in its menu: ${JSON.stringify(active)}`);
 }
 
 async function saveFailureEvidence(page, error, contextName, consoleEvents, pageErrors, extra = {}) {
@@ -374,7 +397,7 @@ async function selectNativeRange(page, initialRange, latestSampleTime) {
 
 async function openInspector(page) {
   const action = await openSimurghMenuAction(page);
-  await action.click();
+  await activateSimurghMenuAction(page, action, 'Inspect with Simurgh');
   const inspector = page.locator('section[data-testid="simurgh-inspector"]');
   await inspector.waitFor({ state: 'visible', timeout: 15_000 });
   return inspector;
@@ -382,7 +405,7 @@ async function openInspector(page) {
 
 async function openFreehandInspector(page) {
   const action = await openSimurghMenuAction(page, 'Freehand with Simurgh');
-  await action.click();
+  await activateSimurghMenuAction(page, action, 'Freehand with Simurgh');
   const inspector = page.locator('section[data-testid="simurgh-inspector"]');
   try {
     await inspector.waitFor({ state: 'visible', timeout: 15_000 });
@@ -409,6 +432,42 @@ async function openFreehandInspector(page) {
     throw new Error(`Freehand action did not open the inspector. dialogs=${JSON.stringify(dialogs)} bridge=${JSON.stringify(bridge)}`);
   }
   return inspector;
+}
+
+async function activateSimurghMenuAction(page, action, actionTitle) {
+  assert.equal(await action.isVisible(), true, `Grafana menu action "${actionTitle}" is not visible before activation`);
+  assert.equal(await action.isEnabled(), true, `Grafana menu action "${actionTitle}" is disabled`);
+  const focusedAction = await action.evaluate((element) => ({
+    active: document.activeElement === element,
+    role: element.getAttribute('role'),
+    name: element.innerText.trim(),
+    visible: element.getBoundingClientRect().width > 0 && element.getBoundingClientRect().height > 0,
+  }));
+  assert.deepEqual(focusedAction, {
+    active: true,
+    role: 'menuitem',
+    name: actionTitle,
+    visible: true,
+  }, `Grafana did not focus the intended visible menu action: ${JSON.stringify(focusedAction)}`);
+  await page.evaluate(() => {
+    window.__simurghMenuActivation = null;
+    window.__simurghMenuClickListener = event => {
+      const item = event.target.closest?.('[role="menuitem"]');
+      if (item) window.__simurghMenuActivation = {
+        name: item.innerText.trim(),
+        role: item.getAttribute('role'),
+        active: document.activeElement === item,
+      };
+    };
+    document.addEventListener('click', window.__simurghMenuClickListener, true);
+  });
+  await page.keyboard.press('Enter');
+  const activation = await page.evaluate(() => {
+    document.removeEventListener('click', window.__simurghMenuClickListener, true);
+    return window.__simurghMenuActivation;
+  });
+  assert.deepEqual(activation, { name: actionTitle, role: 'menuitem', active: true },
+    `Enter activated a different Grafana menu item: ${JSON.stringify(activation)}`);
 }
 
 async function verifyFreehandGesture() {
@@ -467,7 +526,7 @@ async function verifyFreehandGesture() {
     let inspector;
     let relativeRangeOutcome = 'native binding opened without a prior range change';
     const initialAction = await openSimurghMenuAction(page, 'Freehand with Simurgh');
-    await initialAction.click();
+    await activateSimurghMenuAction(page, initialAction, 'Freehand with Simurgh');
     inspector = page.locator('section[data-testid="simurgh-inspector"]');
     try {
       await inspector.waitFor({ state: 'visible', timeout: 6_000 });
@@ -706,7 +765,7 @@ async function verifyMissingExtensionState() {
     assert.equal(epoch(zoomResponse.requestRange?.from), epoch(zoom.from), 'Missing-extension native request start is not absolute');
     assert.equal(epoch(zoomResponse.requestRange?.to), epoch(zoom.to), 'Missing-extension native request end is not absolute');
     const action = await openSimurghMenuAction(page);
-    await action.click();
+    await activateSimurghMenuAction(page, action, 'Inspect with Simurgh');
     const dialog = page.getByRole('dialog');
     await dialog.waitFor({ state: 'visible', timeout: 15_000 });
     const dialogText = await dialog.innerText();
