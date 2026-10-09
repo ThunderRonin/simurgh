@@ -42,7 +42,7 @@ interface NativePlotRecord {
 interface FrameSnapshot {
   refId?: string;
   name?: string;
-  fields: Array<{ name?: string; type?: string; labels: Record<string, string>; values: unknown[] }>;
+  fields: Array<{ name?: string; type?: string; labels: Record<string, string>; values: unknown[]; origin?: { frameIndex: number; fieldIndex: number } }>;
 }
 
 interface NativeSeriesBinding {
@@ -263,7 +263,10 @@ function matchNativePlot(record: NativePlotRecord, context: CaptureContext, capt
       item.type === 'time' || item.type === 'string' && item.name?.toLowerCase() === 'time');
     if (timeFields.length !== 1) return reject('a captured series does not have exactly one source time field');
     const times = readValues(timeFields[0].values);
-    if (!fieldValues || !times || fieldValues.length !== times.length || fieldValues.length !== xValues.length) return reject('native and PanelData vector lengths differ');
+    if (!fieldValues || !times || fieldValues.length !== times.length ||
+      finitePointSignature(times, fieldValues, deadline) !== numericPointsSignature(candidate.points)) {
+      return reject('native source field samples differ from the captured series');
+    }
     const signature = numericPointsSignature(candidate.points);
     const possibleIndexes = (vectorIndexes.get(signature) ?? []).filter((dataIndex) => !usedDataIndexes.has(dataIndex));
     if (possibleIndexes.length !== 1) return reject('a native data vector does not uniquely match its captured samples');
@@ -283,42 +286,48 @@ function matchNativePlot(record: NativePlotRecord, context: CaptureContext, capt
 
 function frameMetadataMismatch(nativeFrames: FrameSnapshot[], contextFrames: NonNullable<CaptureContext['data']>['series'], deadline: number): string | null {
   if (!contextFrames || (contextFrames.some((frame) => (frame.meta?.transformations?.length ?? 0) > 0))) return 'panel transformations are unsupported';
-  const nativeFields = nativeFrames.flatMap((frame) => frame.fields);
-  const contextFields = contextFrames.flatMap((frame) => (frame.fields ?? []).map((field) => ({ refId: frame.refId, field })));
-  const nativeNumeric = nativeFields.filter((field) => field.type === 'number');
-  const contextNumeric = contextFields.filter(({ field }) => field.type === 'number');
+  const nativeNumeric = nativeFrames.flatMap((frame) => frame.fields
+    .filter((field) => field.type === 'number').map((field) => ({ frame, field })));
+  const contextNumeric = contextFrames.flatMap((frame, frameIndex) => (frame.fields ?? [])
+    .map((field, fieldIndex) => ({ frame, frameIndex, field, fieldIndex }))
+    .filter(({ field }) => field.type === 'number'));
   if (nativeNumeric.length === 0 || nativeNumeric.length !== contextNumeric.length) {
     return `native/context numeric field counts differ (${nativeNumeric.length}/${contextNumeric.length})`;
   }
-  const matchedNativeFields = new Set<FrameSnapshot['fields'][number]>();
-  for (const { refId, field } of contextNumeric) {
+  const matchedNativeFields = new Set<(typeof nativeNumeric)[number]['field']>();
+  for (const { frame: contextFrame, frameIndex, field, fieldIndex } of contextNumeric) {
     if (performance.now() > deadline) return 'native field comparison exceeded the 200 ms work budget';
+    const contextTimeFields = (contextFrame.fields ?? []).filter((item) => item.type === 'time' ||
+      item.type === 'string' && item.name?.toLowerCase() === 'time');
+    if (contextTimeFields.length !== 1) return 'a context numeric field does not have exactly one source time field';
+    const contextTimes = readValues(contextTimeFields[0].values);
     const contextValues = readValues(field.values);
-    if (!contextValues) return 'a context numeric field vector is unavailable';
-    const sameNameAndType = nativeNumeric.filter((nativeField) => nativeField.name === field.name && nativeField.type === field.type);
-    const sameIdentity = sameNameAndType.filter((nativeField) => sameLabels(nativeField.labels, field.labels ?? {}));
-    const matches = sameIdentity.filter((nativeField) => sameValuesBefore(nativeField.values, contextValues, deadline));
+    if (!contextTimes || !contextValues || contextTimes.length !== contextValues.length) return 'a context numeric field vector is unavailable';
+    const sameNameAndType = nativeNumeric.filter(({ frame, field: nativeField }) => {
+      const origin = nativeField.origin;
+      const sourceMatches = origin
+        ? origin.frameIndex === frameIndex && origin.fieldIndex === fieldIndex
+        : frame.refId === contextFrame.refId;
+      return sourceMatches && nativeField.name === field.name && nativeField.type === field.type;
+    });
+    const sameIdentity = sameNameAndType.filter(({ field: nativeField }) => sameLabels(nativeField.labels, field.labels ?? {}));
     if (performance.now() > deadline) return 'native field comparison exceeded the 200 ms work budget';
-    if (matches.length === 0) {
-      const identity = `${refId ?? 'unknown'}:${field.name ?? 'unknown'} labels=${JSON.stringify(normalizeLabels(field.labels))}`;
-      if (sameIdentity.length > 0) {
-        const contextNulls = contextValues.filter((value) => value === null || value === undefined).length;
-        const rendererShapes = sameIdentity.map((nativeField) =>
-          `${nativeField.values.length} values/${nativeField.values.filter((value) => value === null || value === undefined).length} nulls`);
-        return `native numeric field values differ for ${identity} (context=${contextValues.length} values/${contextNulls} nulls; renderer=${rendererShapes.join(', ')})`;
-      }
-      return `native numeric field identity differs for ${identity} (${sameNameAndType.length} same-name/type renderer fields)`;
+    const identity = `${contextFrame.refId ?? 'unknown'}:${field.name ?? 'unknown'} labels=${JSON.stringify(normalizeLabels(field.labels))}`;
+    if (sameIdentity.length !== 1) return sameIdentity.length === 0
+      ? `native numeric field identity differs for ${identity} (${sameNameAndType.length} same-name/type renderer fields)`
+      : `native numeric field identity is ambiguous for ${identity} (${sameIdentity.length} exact renderer matches)`;
+    const match = sameIdentity[0];
+    if (matchedNativeFields.has(match.field)) return `native numeric field identity is ambiguous for ${identity} (renderer field was already matched)`;
+    const nativeTimeFields = match.frame.fields.filter((item) => item.type === 'time');
+    if (nativeTimeFields.length !== 1) return `native numeric field has ${nativeTimeFields.length} source time fields for ${identity}`;
+    const nativeSignature = finitePointSignature(nativeTimeFields[0].values, match.field.values, deadline);
+    const contextSignature = finitePointSignature(contextTimes, contextValues, deadline);
+    if (performance.now() > deadline) return 'native field comparison exceeded the 200 ms work budget';
+    if (nativeSignature === null || contextSignature === null || nativeSignature !== contextSignature) {
+      return `native numeric field samples differ for ${identity}`;
     }
-    if (matches.length !== 1 || matchedNativeFields.has(matches[0])) {
-      return `native numeric field identity is ambiguous for ${refId ?? 'unknown'}:${field.name ?? 'unknown'} (${matches.length} exact renderer matches)`;
-    }
-    matchedNativeFields.add(matches[0]);
+    matchedNativeFields.add(match.field);
   }
-  const nativeTimeFields = nativeFields.filter((field) => field.type === 'time');
-  const contextTimeFields = contextFields.filter(({ field }) => field.type === 'time' ||
-    field.type === 'string' && field.name?.toLowerCase() === 'time').map(({ field }) => readValues(field.values));
-  if (nativeTimeFields.length !== 1 || !contextTimeFields.length || contextTimeFields.some((values) =>
-    !values || !sameValues(nativeTimeFields[0].values, values))) return 'native time values do not match all source frame time vectors';
   return null;
 }
 
@@ -335,13 +344,21 @@ function frameValuesWithinLimit(frames: Array<{ fields?: Array<{ values?: { leng
   return true;
 }
 
-function sameValuesBefore(left: unknown[], right: unknown[], deadline: number): boolean {
-  if (left.length !== right.length) return false;
-  for (let index = 0; index < left.length; index += 1) {
-    if ((index & 255) === 0 && performance.now() > deadline) return false;
-    if (!Object.is(left[index], right[index])) return false;
+function finitePointSignature(times: unknown[], values: unknown[], deadline: number): string | null {
+  if (times.length !== values.length) return null;
+  const points: Array<[number, number]> = [];
+  let previousTime = -Infinity;
+  for (let index = 0; index < times.length; index += 1) {
+    if ((index & 255) === 0 && performance.now() > deadline) return null;
+    const time = times[index];
+    const value = values[index];
+    if (typeof time !== 'number' || !Number.isFinite(time) || time <= previousTime) return null;
+    previousTime = time;
+    if (value === null) continue;
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+    points.push([time, value]);
   }
-  return true;
+  return JSON.stringify(points);
 }
 
 function nativeSignature(plot: uPlot, frames: FrameSnapshot[], series: NativeSeriesBinding[], xValues: unknown[]): string {
@@ -398,6 +415,9 @@ function snapshotFrames(frames: DataFrame[]): FrameSnapshot[] {
       type: field.type,
       labels: normalizeLabels(field.labels),
       values: readValues(field.values) ?? [],
+      origin: field.state?.origin && Number.isInteger(field.state.origin.frameIndex) && Number.isInteger(field.state.origin.fieldIndex)
+        ? { frameIndex: field.state.origin.frameIndex, fieldIndex: field.state.origin.fieldIndex }
+        : undefined,
     })),
   }));
 }
@@ -405,10 +425,6 @@ function snapshotFrames(frames: DataFrame[]): FrameSnapshot[] {
 function getGrafanaVersion(): string | undefined {
   return (window as Window & { grafanaBootData?: { settings?: { buildInfo?: { version?: string } } } })
     .grafanaBootData?.settings?.buildInfo?.version;
-}
-
-function sameValues(left: unknown[], right: unknown[]): boolean {
-  return left.length === right.length && left.every((value, index) => Object.is(value, right[index]));
 }
 
 function sameRect(left: DOMRect, right: DOMRect): boolean {
