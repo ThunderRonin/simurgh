@@ -1,6 +1,6 @@
 {
   "name": "@simurgh/coordinator",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "better-sqlite3": "12.4.1",
-    "@simurgh/shared": "1.0.0"
+    "@simurgh/shared": "0.0.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "7.6.13"

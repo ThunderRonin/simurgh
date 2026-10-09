@@ -10,6 +10,8 @@ This project is licensed under the [Apache License 2.0](LICENSE). See [NOTICE](N
 
 See [Phase 1 status](docs/phase1-status.md) for the current selection flow, evidence boundaries, and acceptance status.
 
+See the [0.0.1 experimental release notes](docs/releases/0.0.1.md) for version-specific scope and limitations.
+
 ## See the workflow
 
 ### Confirm the dashboard context

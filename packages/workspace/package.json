@@ -1,6 +1,6 @@
 {
   "name": "@simurgh/workspace",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -11,7 +11,7 @@
     "test:voice-live": "npm run build && node ../../tests/workspace/voice-live.mjs"
   },
   "dependencies": {
-    "@simurgh/shared": "1.0.0",
+    "@simurgh/shared": "0.0.1",
     "lucide-react": "1.54.0",
     "react": "19.1.0",
     "react-dom": "19.1.0"

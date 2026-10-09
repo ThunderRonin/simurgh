@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Simurgh Context Inspector",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "Inspect selected context from supported Grafana panels.",
   "icons": {
     "16": "icons/simurgh-mark-16.png",
