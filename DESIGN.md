@@ -12,7 +12,7 @@ Simurgh connects what a person selects on a dashboard or in an editor to structu
 
 This document captures the agreed product direction, the approved Phase 1 context-inspector scope, and the broader product design. Later delivery details and technology recommendations are labeled; they are not claims that an integration has been implemented or validated.
 
-The Phase 1 design originally called for geometric selection of a plotted region. The delivered development flow currently uses Grafana's native time-range zoom and panel-menu capture; the freehand circle overlay remains deferred and the original selection milestone is not complete. See [Phase 1 status](docs/phase1-status.md) for the exact boundary and evidence.
+The Phase 1 design originally called for geometric selection of a plotted region. The accepted development flow uses Grafana's native time-range zoom and panel-menu capture. A version-pinned freehand overlay prototype has passed the combined local real-browser checks and a live cross-surface test, including chart-change rejection and narrow viewport checks. This verifies the local experimental MVP scope, not production readiness or compatibility beyond the pinned renderer. See [Phase 1 status](docs/phase1-status.md) for the exact boundary and evidence.
 
 ## Contents
 
@@ -542,7 +542,7 @@ The Phase 1 gate includes:
 
 The first technical check is whether the extension/plugin combination can obtain the necessary state from the real panel on the pinned release. If it cannot, report the exact missing capability and revisit that integration mechanism before proceeding. A different chart, guessed metadata, or a partially wired scaffold is not a successful substitute.
 
-This is the intended acceptance target, not a completion claim. The current implementation's native time-range interaction is narrower than geometric selection; browser acceptance evidence is tracked separately in [Phase 1 status](docs/phase1-status.md).
+This remains the intended acceptance target, not a blanket completion claim. The implementation has an experimental Grafana 13.2.3/uPlot 1.6.32 freehand path with passing local integrated checks; compatibility beyond the pinned renderer and production qualification remain open. Acceptance evidence and limitations are tracked separately in [Phase 1 status](docs/phase1-status.md).
 
 ### 13.2 Delivery phases
 
