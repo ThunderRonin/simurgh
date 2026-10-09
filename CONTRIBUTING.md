@@ -2,6 +2,26 @@
 
 Thanks for taking an interest in Simurgh. The project is early-stage and its Phase 1 boundary is documented in [DESIGN.md](DESIGN.md): read-only Grafana context capture, explicit user confirmation, and inspectable provenance. Please discuss substantial changes before investing in an implementation.
 
+## Branch workflow
+
+- `dev` is the default branch and integration target for ongoing development.
+- `main` is the stable release branch. Promote `dev` to `main` through a release pull request only after verification; do not push directly to `main`.
+- Start short-lived `feat/<name>`, `fix/<name>`, or `docs/<name>` branches from an up-to-date `dev`, and open pull requests against `dev`.
+- CI runs on pushes and pull requests to both long-lived branches. The required `checks` job must pass on an up-to-date release pull request before merging into `main`.
+- Use merge commits for `dev` to `main` promotions so their shared history is preserved. Squash merges are suitable for short-lived feature branches.
+- For an urgent released-version fix, branch `hotfix/<name>` from `main`, submit a verified pull request to `main`, then merge `main` back into `dev` through a pull request.
+- Never force-push or delete either long-lived branch. Direct pushes to `dev` remain available to maintainers during the early MVP; contributor changes should use pull requests.
+
+Start a contribution with:
+
+```sh
+git switch dev
+git pull --ff-only origin dev
+git switch -c feat/my-change
+```
+
+`main` requires a pull request, passing CI, and resolved review conversations, including for administrators. Independent review is encouraged; a mandatory approval count is not enabled while the project has a single maintainer. Passing CI is necessary, not proof of production readiness. Tag releases only after the release pull request is merged and its deployment/signing gates are met.
+
 ## Before opening a pull request
 
 - Check existing issues and pull requests for related work.
