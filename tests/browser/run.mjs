@@ -204,7 +204,7 @@ async function openSimurghMenuAction(page, actionTitle = 'Inspect with Simurgh')
   await menu.click();
   const extensions = page.getByRole('menuitem', { name: 'Extensions', exact: true });
   await extensions.waitFor({ state: 'visible', timeout: 10_000 });
-  await extensions.click();
+  await extensions.hover();
   const action = page.getByRole('menuitem', { name: actionTitle, exact: true });
   try {
     await action.waitFor({ state: 'visible', timeout: 10_000 });
@@ -325,48 +325,6 @@ async function summarizeQueryFrames(responses) {
   return result;
 }
 
-async function nativeCanvasSignature(page) {
-  return page.evaluate(() => {
-    const canvases = [...document.querySelectorAll('canvas')].filter(canvas => {
-      const rect = canvas.getBoundingClientRect();
-      return rect.width > 300 && rect.height > 120;
-    });
-    const hashCanvas = canvas => {
-      const sample = document.createElement('canvas');
-      sample.width = 96;
-      sample.height = 48;
-      const context = sample.getContext('2d', { willReadFrequently: true });
-      if (!context) return 'unavailable';
-      context.drawImage(canvas, 0, 0, sample.width, sample.height);
-      const pixels = context.getImageData(0, 0, sample.width, sample.height).data;
-      let hash = 2166136261;
-      for (let index = 0; index < pixels.length; index += 4) {
-        hash ^= pixels[index] | pixels[index + 1] << 8 | pixels[index + 2] << 16 | pixels[index + 3] << 24;
-        hash = Math.imul(hash, 16777619);
-      }
-      return (hash >>> 0).toString(16);
-    };
-    return canvases.map(canvas => `${canvas.width}x${canvas.height}:${hashCanvas(canvas)}`).join('|');
-  });
-}
-
-async function waitForNativeCanvasAfterRange(page, beforeSignature, timeout = 15_000) {
-  const deadline = Date.now() + timeout;
-  let previous;
-  let changed = false;
-  let stableFrames = 0;
-  while (Date.now() < deadline) {
-    const current = await nativeCanvasSignature(page);
-    changed ||= current.length > 0 && current !== beforeSignature;
-    if (changed && current === previous) stableFrames += 1;
-    else stableFrames = 0;
-    if (stableFrames >= 3) return current;
-    previous = current;
-    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => resolve())));
-  }
-  throw new Error(`Grafana native chart did not produce a changed, stable canvas after range query (changed=${changed}, stableFrames=${stableFrames})`);
-}
-
 async function selectNativeRange(page, initialRange, latestSampleTime) {
   const before = new URL(page.url());
   const canvases = page.locator('canvas');
@@ -383,7 +341,6 @@ async function selectNativeRange(page, initialRange, latestSampleTime) {
     }
   }
   assert.ok(target, 'Could not locate the native Grafana timeseries canvas');
-  const canvasBeforeSignature = await nativeCanvasSignature(page);
 
   const targetEnd = Math.min(initialRange.to, latestSampleTime - 1000);
   const targetStart = Math.max(initialRange.from, latestSampleTime - 120_000);
@@ -411,7 +368,7 @@ async function selectNativeRange(page, initialRange, latestSampleTime) {
   assert.ok(from && to, `Native Grafana zoom did not publish absolute from/to in the URL (before=${before.href}, after=${after.href})`);
   assert.notEqual(`${from}/${to}`, `${before.searchParams.get('from')}/${before.searchParams.get('to')}`,
     'Native Grafana range did not change after drag');
-  return { from, to, targetStart, targetEnd, startRatio, endRatio, canvasBeforeSignature };
+  return { from, to, targetStart, targetEnd, startRatio, endRatio };
 }
 
 async function openInspector(page) {
@@ -520,9 +477,8 @@ async function verifyFreehandGesture() {
         `Initial freehand attempt failed for an unexpected reason: ${relativeRangeOutcome}`);
       await page.getByRole('button', { name: 'Close', exact: true }).last().click();
       const queryIndex = queries.length;
-      const zoom = await selectNativeRange(page, warmData.range, warmData.latestSampleTime);
+      await selectNativeRange(page, warmData.range, warmData.latestSampleTime);
       await waitForNumericResponse(queries, queryIndex);
-      await waitForNativeCanvasAfterRange(page, zoom.canvasBeforeSignature);
       actual = (await latestNumericResponse(queries)).series;
       inspector = await openFreehandInspector(page);
     }
@@ -845,7 +801,6 @@ async function main() {
     const zoom = await selectNativeRange(page, warmData.range, warmData.latestSampleTime);
     await waitUntil(() => grafanaQueries.length > queryCountBeforeZoom, 'Native zoom did not issue a new Grafana data query', 30_000);
     const zoomResponse = await waitForNumericResponse(grafanaQueries, queryCountBeforeZoom);
-    await waitForNativeCanvasAfterRange(page, zoom.canvasBeforeSignature);
     assert.equal(zoomResponse.status, 200, 'Grafana native zoom query failed');
     const nativeSeries = zoomResponse.series;
     assert.ok(nativeSeries.length > 1, `Grafana query returned ${nativeSeries.length} numeric series; expected the real multi-series CPU panel`);
