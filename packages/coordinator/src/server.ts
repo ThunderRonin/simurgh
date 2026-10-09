@@ -532,11 +532,8 @@ export function createCoordinator(options: CoordinatorOptions) {
         const bytes = Buffer.byteLength(JSON.stringify(evidence));
         if (controller.signal.aborted || get(i.id)?.status !== "running")
           throw new Error("Late result discarded");
-        if (bytes > limits.bytes - i.usage.bytes) {
-          stop(i, "limited", "Data budget reached");
-          throw new Error("Data budget reached");
-        }
-        charge(bytes);
+        // Telemetry response bytes were charged while streaming; source evidence is charged after serialization.
+        if (ref.kind === "source") charge(bytes);
         i.evidence.push(evidence);
         save(i);
         emit(i);

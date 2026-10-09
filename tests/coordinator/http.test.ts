@@ -250,6 +250,7 @@ describe("coordinator HTTP permission boundary", () => {
     ).investigation;
     expect(limited.status).toBe("limited");
     expect(limited.usage.queries).toBe(2);
+    expect(limited.usage.bytes).toBe(Buffer.byteLength(JSON.stringify(evidence)));
     finish({
       strength: "supported",
       summary: "Late",
