@@ -122,3 +122,23 @@ SIMURGH_CROSS_SURFACE_REAL_VERIFY=1 npx vitest run tests/coordinator/cross-surfa
 ```
 
 It imports the exact browser/editor artifacts, validates telemetry scope, collects selected/baseline values through the trusted local policy, and uses the same isolated Codex settings. One targeted pass using an actual freehand-confirmed capture passed for the pinned local config; this does not qualify another machine or deployment. Do not describe the MVP as production-qualified. Local experimental MVP checks passed; compatibility outside the pinned Grafana/uPlot versions and freehand mobile touch input remain unqualified. The accepted Grafana baseline is native drag-to-zoom. Consult [GitHub Actions](https://github.com/ThunderRonin/simurgh/actions) for the remote result associated with a specific commit. See [MVP status](mvp-status.md) and [Phase 1 status](phase1-status.md).
+
+## Live workspace browser verification
+
+The workspace defaults to dark mode. `npm run test:workspace` covers client interactions against a deterministic fixture server, including rendered dark surfaces, warning/dialog text contrast, and narrow layouts. It does not execute a real agent.
+
+For the complete browser-to-coordinator-to-agent workflow, first run the real editor and browser capture checks and qualify the isolated Codex settings as above. Use only local lab or otherwise explicitly approved data: the test saves screenshots containing the supplied references and the actual finding.
+
+```sh
+npm run test:editor
+npm run test:firefox
+SIMURGH_WORKSPACE_LIVE=1 \
+SIMURGH_CONFIG="$state_dir/coordinator.json" \
+SIMURGH_CAPTURE_PATH="$PWD/test-results/firefox/freehand-confirmed-capture-firefox.json" \
+SIMURGH_SOURCE_PATH="$PWD/test-results/editor/source-capture.json" \
+npm run test:workspace:live
+```
+
+All three paths must be absolute, and the config must be owner-only. This opt-in test uses the config's authorized telemetry policy and qualified Codex settings, but creates its own temporary database, owner/viewer credentials, and loopback server. It does not modify the existing workspace's records or copy its authentication tokens. It consumes the existing account's model entitlement; it is not a mocked reasoning run.
+
+The test imports exactly the two supplied artifacts, follows the newly submitted investigation ID to completion in both API and UI, checks selected/baseline metric samples and source snapshot preservation, and exercises sharing, export, revocation, and logout. It verifies dark rendering and narrow-screen overflow. Temporary server, browser, and credentials are cleaned up; screenshots remain in `test-results/workspace/live-desktop.png` and `live-narrow.png`. Inspect them for private data before publishing. These checks establish neither a runtime-to-code causal link nor physical-microphone compatibility; use the separate voice browser test for the audio pipeline.

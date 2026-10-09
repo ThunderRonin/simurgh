@@ -13,6 +13,7 @@
     "test": "vitest run",
     "test:editor": "npm run test:host --workspace @simurgh/vscode-extension",
     "test:workspace": "npm run test:workspace --workspace @simurgh/workspace",
+    "test:workspace:live": "npm run build --workspace @simurgh/workspace && node tests/workspace/live.mjs",
     "test:browser": "node tests/browser/run.mjs",
     "test:firefox": "node tests/firefox/startup.mjs && node tests/firefox/run.mjs",
     "build:firefox": "npm run build:firefox --workspace @simurgh/chromium-extension",
