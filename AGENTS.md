@@ -15,6 +15,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for pull request expectations and [SECURI
 
 ## Maintainer agent dispatch
 
-- Use Sol 6.1 (`gpt-6.1-sol`) for planning and independent review. For backend implementation, use Sol 6.1 with low reasoning; this replaces the earlier Terra assignment and Sol planning-only restriction.
-- Use the latest available Luna for client, mirror, and documentation work. The current exposed identifier is `gpt-6-luna`; do not invent a version that the host does not offer.
+- Use Sol 6.1 (`gpt-6.1-sol`) for planning and independent review. For backend implementation and lighter client reviews, use Sol 6.1 with `low` reasoning; this permanently replaces Terra and the former Sol planning-only restriction. No additional exception approval is needed, and Luna is not a backend substitute.
+- Use the latest available Luna for client, mirror, documentation, and testing work. The current exposed identifier is `gpt-6-luna`; do not invent a version that the host does not offer. Report an unavailable assigned model instead of silently substituting.
 - Replace older Sol model assignments with Sol 6.1. Use current Luna rather than older Luna versions when available. Never use `max`; use `xhigh` only when explicitly requested.
