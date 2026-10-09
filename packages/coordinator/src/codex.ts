@@ -93,7 +93,18 @@ export function codexAdapter(settings: CodexSettings): AgentAdapter {
             return;
           }
           const id = ++seq;
-          pending.set(id, { resolve, reject });
+          pending.set(id, {
+            resolve: (result) => {
+              // Subsequent events can share the response's stdout chunk.
+              if (
+                method === "turn/start" &&
+                typeof result?.turn?.id === "string"
+              )
+                turnId = result.turn.id;
+              resolve(result);
+            },
+            reject,
+          });
           write({ id, method, params });
         });
       const kill = () => {

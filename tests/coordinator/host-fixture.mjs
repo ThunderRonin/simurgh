@@ -8,7 +8,12 @@ if (
   !process.argv.includes("features.code_mode.enabled=false")
 )
   process.exit(9);
-const send = (value) => process.stdout.write(JSON.stringify(value) + "\n");
+let batch;
+const send = (value) => {
+  const line = JSON.stringify(value) + "\n";
+  if (batch) batch.push(line);
+  else process.stdout.write(line);
+};
 const reply = (m, result) => send({ id: m.id, result });
 let calls = 0;
 createInterface({ input: process.stdin }).on("line", (line) => {
@@ -42,6 +47,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         mode === "instructions" ? ["/untrusted/AGENTS.md"] : [],
     });
   } else if (m.method === "turn/start") {
+    // Coalesce the response and events to expose protocol ordering races.
+    if (mode === "badcalls") batch = [];
     if (mode === "exit") {
       process.exit(2);
       return;
@@ -115,6 +122,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         method: "item/tool/call",
         params: { threadId, turnId, tool, callId, arguments: args },
       });
+    if (batch) {
+      process.stdout.write(batch.join(""));
+      batch = undefined;
+    }
   } else if (m.id >= 100 && m.result?.success) {
     const evidence = JSON.parse(m.result.contentItems[0].text);
     send({

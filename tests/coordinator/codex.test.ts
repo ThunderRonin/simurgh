@@ -43,7 +43,7 @@ async function exercise(mode: string, cancel = false) {
   }
 }
 describe("real child protocol adapter with synthetic host only", () => {
-  it("routes only validated non-replayed reference requests", async () => {
+  it("routes only validated non-replayed reference requests coalesced with the turn response", async () => {
     expect((await exercise("badcalls")).calls).toBe(1);
   });
   it.each([
